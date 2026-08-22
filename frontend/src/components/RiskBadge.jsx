@@ -2,21 +2,51 @@ import React from 'react';
 import { clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
-const RiskBadge = ({ score }) => {
-  const getColors = (s) => {
-    if (s >= 70) return "bg-red-500/10 text-red-500 border-red-500/20";
-    if (s >= 40) return "bg-amber-500/10 text-amber-500 border-amber-500/20";
-    return "bg-green-500/10 text-green-500 border-green-500/20";
+const RiskBadge = ({ score, showLabel = true, className = "" }) => {
+  const getRiskDetails = (s) => {
+    if (s >= 85) {
+      return {
+        label: 'CRITICAL',
+        styles: 'bg-rose-500/15 text-rose-400 border-rose-500/30'
+      };
+    }
+    if (s >= 70) {
+      return {
+        label: 'HIGH',
+        styles: 'bg-orange-500/15 text-orange-400 border-orange-500/30'
+      };
+    }
+    if (s >= 40) {
+      return {
+        label: 'MEDIUM',
+        styles: 'bg-amber-500/15 text-amber-400 border-amber-500/30'
+      };
+    }
+    return {
+      label: 'LOW',
+      styles: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
+    };
   };
 
+  const { label, styles } = getRiskDetails(Number(score || 0));
+
   return (
-    <div className={twMerge(
-      "inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold border",
-      getColors(score)
-    )}>
-      {score}
+    <div
+      className={twMerge(
+        "inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-mono font-bold border shrink-0",
+        styles,
+        className
+      )}
+    >
+      <span>{score}</span>
+      {showLabel && (
+        <span className="text-[9px] font-sans font-semibold tracking-wider opacity-90 border-l border-current/30 pl-1.5 uppercase">
+          {label}
+        </span>
+      )}
     </div>
   );
 };
 
 export default RiskBadge;
+

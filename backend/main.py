@@ -1,6 +1,10 @@
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
+import asyncio
+import random
+import string
 
 import uvicorn
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -12,7 +16,18 @@ from app.services.orchestrator import run_pipeline
 
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="SENTINEL - Real-Time Fraud Response System")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Lifespan context manager that handles background simulation loop startup and shutdown.
+    """
+    loop_task = asyncio.create_task(_baseline_loop())
+    yield
+    loop_task.cancel()
+
+
+app = FastAPI(title="SENTINEL - Real-Time Fraud Response System", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -177,6 +192,7 @@ async def process_tx(request: Request) -> dict[str, Any]:
     tx_event = {
         "event": "tx_scored",
         "tx_id": transaction.get("tx_id", ""),
+        "timestamp": transaction.get("timestamp") or _now_iso(),
         "case_id": transaction.get("case_id", ""),
         "risk_score": float(transaction.get("risk_score", 0.0)),
         "amount": float(transaction.get("amount", 0.0)),
@@ -192,6 +208,7 @@ async def process_tx(request: Request) -> dict[str, Any]:
         "rule_score": transaction.get("rule_score", 0),
         "ml_feature_importance": transaction.get("ml_feature_importance", {})
     }
+
     await manager.broadcast(tx_event)
 
     case = result.get("case")
@@ -463,6 +480,7 @@ async def trigger_attack_mode() -> dict[str, Any]:
             tx_event = {
                 "event": "tx_scored",
                 "tx_id": transaction.get("tx_id", ""),
+                "timestamp": transaction.get("timestamp") or _now(),
                 "case_id": transaction.get("case_id", ""),
                 "risk_score": float(transaction.get("risk_score", 0.0)),
                 "amount": float(transaction.get("amount", 0.0)),
@@ -488,11 +506,122 @@ async def trigger_attack_mode() -> dict[str, Any]:
     return {"ok": True, "message": "Attack mode burst initiated — 5 high-risk transactions injected"}
 
 
+async def _baseline_loop():
+    """
+    Launches a continuous background simulation loop on backend startup.
+    Generates baseline transactions across low/medium/high risk scenarios.
+    """
+    await asyncio.sleep(0.5)
+    while True:
+        try:
+            tier = random.choices(["LOW", "MEDIUM", "HIGH"], weights=[60, 25, 15])[0]
+            channel = random.choice(["UPI", "IMPS", "NEFT", "CARD"])
+            sender = f"ACC-USR-{random.randint(1000, 9999)}"
+            receiver = f"ACC-MERCH-{random.randint(1000, 9999)}"
+            
+            if tier == "LOW":
+                amount = round(random.uniform(100, 8000), 2)
+                tx = {
+                    "tx_id": f"TX-{uuid4().hex[:8].upper()}",
+                    "timestamp": _now_iso(),
+                    "sender_account": sender,
+                    "receiver_account": receiver,
+                    "amount": amount,
+                    "currency": "INR",
+                    "channel": channel
+                }
+            elif tier == "MEDIUM":
+                amount = round(random.uniform(25000, 85000), 2)
+                tx = {
+                    "tx_id": f"TX-{uuid4().hex[:8].upper()}",
+                    "timestamp": _now_iso(),
+                    "sender_account": sender,
+                    "receiver_account": receiver,
+                    "amount": amount,
+                    "currency": "INR",
+                    "channel": channel,
+                    "on_active_call": random.choice([True, False]),
+                    "is_scripted": True
+                }
+            else: # HIGH
+                amount = round(random.uniform(150000, 450000), 2)
+                tx = {
+                    "tx_id": f"TX-{uuid4().hex[:8].upper()}",
+                    "timestamp": _now_iso(),
+                    "sender_account": f"ACC-VICTIM-{random.randint(1000, 9999)}",
+                    "receiver_account": f"ACC-MULE-{random.randint(1000, 9999)}",
+                    "amount": amount,
+                    "currency": "INR",
+                    "channel": channel,
+                    "is_cross_border": random.choice([True, False])
+                }
+
+            result = run_pipeline(tx, data_store)
+            transaction = result.get("transaction") or {}
+            tx_event = {
+                "event": "tx_scored",
+                "tx_id": transaction.get("tx_id", ""),
+                "timestamp": transaction.get("timestamp") or _now_iso(),
+                "case_id": transaction.get("case_id", ""),
+                "risk_score": float(transaction.get("risk_score", 0.0)),
+                "amount": float(transaction.get("amount", 0.0)),
+                "sender_account": transaction.get("sender_account", "UNKNOWN"),
+                "receiver_account": transaction.get("receiver_account", "UNKNOWN"),
+                "channel": transaction.get("channel", "UPI"),
+                "risk_factors": transaction.get("risk_factors", []),
+                "threshold": transaction.get("threshold", "LOW"),
+                "reason": transaction.get("reason", "Low risk pattern"),
+                "full_reason": transaction.get("full_reason", ""),
+                "confidence": transaction.get("confidence", "LOW"),
+                "ml_score": transaction.get("ml_score", 0),
+                "rule_score": transaction.get("rule_score", 0),
+                "ml_feature_importance": transaction.get("ml_feature_importance", {})
+            }
+            await manager.broadcast(tx_event)
+            case = result.get("case")
+            if case:
+                await manager.broadcast({"event": "case_updated", **_case_payload(case)})
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            print(f"[SENTINEL Simulator] Background loop error: {e}")
+        
+        await asyncio.sleep(random.uniform(5.0, 8.0))
+
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
     await manager.connect(websocket)
     try:
         await websocket.send_json({"event": "connected", "status": "LIVE"})
+
+        # Hydrate newly connected WS client with recent transactions
+        tx_store = data_store.get("transactions", {})
+        recent_txs = list(tx_store.values())[-20:]
+        for transaction in recent_txs:
+            tx_event = {
+                "event": "tx_scored",
+                "tx_id": transaction.get("tx_id", ""),
+                "timestamp": transaction.get("timestamp") or _now_iso(),
+                "case_id": transaction.get("case_id", ""),
+                "risk_score": float(transaction.get("risk_score", 0.0)),
+                "amount": float(transaction.get("amount", 0.0)),
+                "sender_account": transaction.get("sender_account", "UNKNOWN"),
+                "receiver_account": transaction.get("receiver_account", "UNKNOWN"),
+                "channel": transaction.get("channel", "UPI"),
+                "risk_factors": transaction.get("risk_factors", []),
+                "threshold": transaction.get("threshold", "LOW"),
+                "reason": transaction.get("reason", "Low risk pattern"),
+                "full_reason": transaction.get("full_reason", ""),
+                "confidence": transaction.get("confidence", "LOW"),
+                "ml_score": transaction.get("ml_score", 0),
+                "rule_score": transaction.get("rule_score", 0),
+                "ml_feature_importance": transaction.get("ml_feature_importance", {})
+            }
+            await websocket.send_json(tx_event)
+
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:

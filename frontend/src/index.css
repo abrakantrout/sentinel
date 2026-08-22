@@ -3,25 +3,25 @@
 @tailwind utilities;
 
 :root {
-  --background: 222.2 84% 4.9%;
-  --foreground: 210 40% 98%;
-  --card: 222.2 84% 4.9%;
+  --background: 224 47% 4%;       /* #090d16 Deep dark navy */
+  --foreground: 210 40% 98%;      /* #f8fafc Clean primary text */
+  --card: 222 40% 7.5%;           /* #0e1626 Dark navy surface */
   --card-foreground: 210 40% 98%;
-  --popover: 222.2 84% 4.9%;
+  --popover: 222 40% 7.5%;
   --popover-foreground: 210 40% 98%;
-  --primary: 217.2 91.2% 59.8%;
-  --primary-foreground: 222.2 47.4% 11.2%;
-  --secondary: 217.2 32.6% 17.5%;
+  --primary: 217 91% 60%;         /* #3b82f6 Electric blue accent */
+  --primary-foreground: 0 0% 100%;
+  --secondary: 222 30% 12%;       /* #162032 Slate dark surface */
   --secondary-foreground: 210 40% 98%;
-  --muted: 217.2 32.6% 17.5%;
-  --muted-foreground: 215.2 16.3% 46.9%;
-  --accent: 217.2 32.6% 17.5%;
+  --muted: 222 30% 12%;
+  --muted-foreground: 215 20% 65%;/* #94a3b8 Slate metadata */
+  --accent: 222 30% 15%;
   --accent-foreground: 210 40% 98%;
-  --destructive: 0 62.8% 30.6%;
+  --destructive: 0 84% 60%;       /* #ef4444 Critical red */
   --destructive-foreground: 210 40% 98%;
-  --border: 217.2 32.6% 17.5%;
-  --input: 217.2 32.6% 17.5%;
-  --ring: 224.3 76.3% 48%;
+  --border: 222 30% 15%;          /* #1e293b Subtle border */
+  --input: 222 30% 15%;
+  --ring: 217 91% 60%;
 }
 
 @layer base {
@@ -29,6 +29,40 @@
     @apply border-border;
   }
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background text-foreground font-sans antialiased selection:bg-primary/30 selection:text-primary-foreground;
   }
 }
+
+/* Custom subtle scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+/* Animation for new row arrival in stream */
+@keyframes newRowEntry {
+  0% {
+    background-color: rgba(56, 189, 248, 0.18);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+.animate-new-row {
+  animation: newRowEntry 2.5s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+

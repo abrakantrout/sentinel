@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { ShieldAlert, Zap, CheckCircle2 } from 'lucide-react';
 import { getRole } from '../roleStore';
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
@@ -44,29 +45,41 @@ const AttackModeToggle = () => {
   }, []);
 
   return (
-    <div className={`space-y-2 ${isViewer ? 'opacity-50 grayscale pointer-events-none' : ''}`}>
+    <div className={`space-y-2.5 ${isViewer ? 'opacity-60 pointer-events-none' : ''}`}>
       {isAttack && (
-        <div className="flex items-center gap-2 px-3 py-2 bg-red-500/10 border border-red-500/30 rounded-xl animate-pulse">
-          <span className="w-2 h-2 bg-red-500 rounded-full animate-ping" />
-          <span className="text-[9px] font-black uppercase tracking-widest text-red-500">
-            Attack Detected — Burst Active
+        <div className="flex items-center gap-2 px-3 py-1.5 bg-rose-500/10 border border-rose-500/30 rounded-lg text-rose-400 animate-pulse">
+          <ShieldAlert className="w-3.5 h-3.5 shrink-0 text-rose-400" />
+          <span className="text-[10px] font-bold uppercase tracking-wider font-mono">
+            Simulated Burst Active
           </span>
         </div>
       )}
-      <div className={`flex items-center gap-2 bg-muted/30 p-1 rounded-lg border transition-colors duration-300 shadow-inner ${isAttack ? 'border-red-500/40 bg-red-500/5' : 'border-border'}`}>
+      
+      <div className="flex items-center justify-between p-1 bg-muted/40 border border-border/80 rounded-xl">
         <button
           onClick={toggleMode}
           disabled={isViewer}
-          className={`px-3 py-1 text-[10px] font-bold rounded-md transition-all duration-300 ${!isAttack ? 'bg-background shadow-sm text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+          className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-[11px] font-semibold transition-all duration-200 ${
+            !isAttack
+              ? 'bg-slate-800 text-emerald-400 shadow-sm border border-slate-700/60'
+              : 'text-slate-400 hover:text-slate-200'
+          }`}
         >
-          NORMAL
+          <CheckCircle2 className="w-3 h-3" />
+          <span>NORMAL</span>
         </button>
+
         <button
           onClick={toggleMode}
           disabled={isViewer}
-          className={`px-3 py-1 text-[10px] font-bold rounded-md transition-all duration-300 ${isAttack ? 'bg-red-600 text-white shadow-[0_0_20px_rgba(220,38,38,0.6)] animate-pulse' : 'text-muted-foreground hover:text-foreground'}`}
+          className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-[11px] font-semibold transition-all duration-200 ${
+            isAttack
+              ? 'bg-rose-600 text-white shadow-md shadow-rose-600/30 border border-rose-500'
+              : 'text-slate-400 hover:text-slate-200'
+          }`}
         >
-          ⚡ ATTACK
+          <Zap className="w-3 h-3 fill-current" />
+          <span>ATTACK</span>
         </button>
       </div>
     </div>
@@ -74,3 +87,4 @@ const AttackModeToggle = () => {
 };
 
 export default AttackModeToggle;
+

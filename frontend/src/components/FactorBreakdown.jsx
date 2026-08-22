@@ -5,42 +5,40 @@ const FactorBreakdown = ({ factors = [] }) => {
   const sortedFactors = [...factors].sort((a, b) => b.contribution - a.contribution);
 
   return (
-    <div className="space-y-4">
-      <h3 className="text-sm font-bold uppercase tracking-widest text-muted-foreground opacity-50">Risk Analysis</h3>
+    <div className="space-y-3 font-sans">
+      <h3 className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Risk Factor Breakdown</h3>
       <div className="space-y-2">
         {sortedFactors.length > 0 ? (
           sortedFactors.map((factor, index) => (
             <div 
               key={`${factor.name}-${index}`}
-              className="group bg-muted/30 hover:bg-muted/50 p-3 rounded-lg border border-transparent hover:border-border transition-all"
+              className="group bg-slate-900/60 hover:bg-slate-900 p-2.5 rounded-lg border border-border/60 transition-all"
             >
               <div className="flex justify-between items-center mb-1">
-                <span className="text-xs font-bold uppercase text-primary tracking-tight">
+                <span className="text-xs font-semibold text-sky-400">
                   {factor.name.replace(/_/g, ' ')}
                 </span>
-                <span className="text-xs font-mono font-bold text-red-400">
+                <span className="text-xs font-mono font-bold text-rose-400">
                   +{factor.contribution}%
                 </span>
               </div>
-              <div className="flex justify-between items-end">
-                <div className="text-[10px] text-muted-foreground">
-                  Weight: <span className="text-foreground">{factor.weight}</span>
-                </div>
-                <div className="text-xs font-mono">
+              <div className="flex justify-between items-center text-[10px] text-slate-400 mb-1.5 font-mono">
+                <span>Weight: {factor.weight}</span>
+                <span>
                   {typeof factor.value === 'number' ? `₹${factor.value.toLocaleString()}` : factor.value}
-                </div>
+                </span>
               </div>
-              {/* Simple progress bar representation */}
-              <div className="mt-2 h-1 w-full bg-background rounded-full overflow-hidden">
+              {/* Progress bar */}
+              <div className="h-1 w-full bg-slate-800 rounded-full overflow-hidden">
                 <div 
-                  className="h-full bg-red-500/50 group-hover:bg-red-500 transition-all"
-                  style={{ width: `${factor.contribution}%` }}
+                  className="h-full bg-rose-500 transition-all duration-300"
+                  style={{ width: `${Math.min(factor.contribution, 100)}%` }}
                 />
               </div>
             </div>
           ))
         ) : (
-          <p className="text-xs text-muted-foreground italic">No risk factors identified.</p>
+          <p className="text-xs text-slate-400 italic">No risk factors identified.</p>
         )}
       </div>
     </div>
@@ -48,3 +46,4 @@ const FactorBreakdown = ({ factors = [] }) => {
 };
 
 export default FactorBreakdown;
+

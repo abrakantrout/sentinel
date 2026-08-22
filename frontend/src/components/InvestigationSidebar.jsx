@@ -5,6 +5,7 @@ import FactorBreakdown from './FactorBreakdown';
 import ActionButton from './ActionButton';
 import { maskAccount } from '../utils/maskAccount';
 import { twMerge } from 'tailwind-merge';
+import { X, ShieldAlert, Cpu, ArrowRight, Clock, Activity, Lock, Eye, AlertTriangle, ShieldCheck, CheckCircle2 } from 'lucide-react';
 
 const InvestigationSidebar = ({ 
   isOpen, 
@@ -48,38 +49,41 @@ const InvestigationSidebar = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 overflow-hidden">
+    <div className="fixed inset-0 z-50 overflow-hidden font-sans">
       {/* Backdrop */}
       <div 
-        className="absolute inset-0 bg-black/60 backdrop-blur-sm transition-opacity" 
+        className="absolute inset-0 bg-black/70 backdrop-blur-sm transition-opacity" 
         onClick={onClose}
       />
 
       <div className="absolute inset-y-0 right-0 max-w-full flex">
         <div className="w-screen max-w-md animate-in slide-in-from-right duration-300">
-          <div className="h-full flex flex-col bg-card border-l border-border shadow-2xl overflow-y-scroll">
+          <div className="h-full flex flex-col bg-card border-l border-border/80 shadow-2xl overflow-y-auto">
             
             {/* Header - Sticky */}
-            <header className="sticky top-0 z-10 bg-card/90 backdrop-blur-md border-b border-border p-6">
-              <div className="flex justify-between items-start mb-4">
+            <header className="sticky top-0 z-10 bg-card/95 backdrop-blur-md border-b border-border/80 p-5">
+              <div className="flex justify-between items-start mb-3">
                 <div>
-                  <h2 className="text-xs font-bold uppercase tracking-widest text-muted-foreground mb-1">
-                    Investigation Unit
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400 block mb-1">
+                    Investigation Drawer
+                  </span>
+                  <h2 className="text-lg font-mono font-bold text-slate-100">
+                    {selectedCase?.case_id || selectedTransaction?.tx_id || 'ANALYSIS UNIT'}
                   </h2>
-                  <p className="text-xl font-black tracking-tighter">
-                    {selectedCase?.case_id || 'STANDALONE TX'}
-                  </p>
                 </div>
-                <button onClick={onClose} className="p-2 hover:bg-muted rounded-full transition-colors">
-                   <span className="text-xl">✕</span>
+                <button 
+                  onClick={onClose} 
+                  className="p-1.5 hover:bg-slate-800 rounded-lg transition-colors text-slate-400 hover:text-slate-200"
+                >
+                  <X className="w-5 h-5" />
                 </button>
               </div>
 
               {selectedCase && (
-                <div className="flex items-center gap-4">
+                <div className="flex items-center gap-3 pt-1">
                   <RiskBadge score={selectedCase.risk_level} />
                   <GoldenTimer minutes={selectedCase.golden_window_minutes} />
-                  <span className="text-[10px] px-2 py-1 bg-primary/10 text-primary rounded font-bold uppercase">
+                  <span className="text-[10px] font-mono font-semibold px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700/60 uppercase">
                     {selectedCase.status}
                   </span>
                 </div>
@@ -87,102 +91,94 @@ const InvestigationSidebar = ({
             </header>
 
             {/* Content Body */}
-            <div className="flex-1 p-6 space-y-8">
+            <div className="flex-1 p-5 space-y-6">
               
               {/* Transaction Context */}
               {selectedTransaction && (
-                <section>
-                  <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-primary mb-4">Transaction Context</h3>
-                  <div className="bg-muted/30 rounded-2xl p-4 border border-border">
-                    <div className="flex justify-between items-center mb-4">
-                      <span className="font-mono text-xs font-bold">
-                        {isViewer ? '••••••' : selectedTransaction.tx_id}
-                      </span>
-                      <span className="text-[10px] bg-background px-2 py-1 rounded border border-border font-bold">
-                        {selectedTransaction.channel}
+                <section className="bg-muted/30 rounded-xl p-4 border border-border/80">
+                  <div className="flex items-center justify-between mb-3 pb-2 border-b border-border/60">
+                    <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Transaction Context</span>
+                    <span className="text-[10px] font-mono font-semibold px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700/60 uppercase">
+                      {selectedTransaction.channel}
+                    </span>
+                  </div>
+                  
+                  <div className="space-y-3">
+                    <div className="flex justify-between items-center text-xs">
+                      <span className="text-slate-400">Tx ID</span>
+                      <span className="font-mono font-semibold text-slate-200">
+                        {isViewer ? '••••••••' : selectedTransaction.tx_id}
                       </span>
                     </div>
-                    <div className="flex items-center gap-3 mb-4">
-                      <div className="flex-1">
-                         <span className="text-[8px] uppercase text-muted-foreground font-bold">Sender</span>
-                          <p className="font-mono text-sm text-primary">
-                            {isViewer ? maskAccount(selectedTransaction.sender_account) : selectedTransaction.sender_account}
-                          </p>
+
+                    <div className="flex items-center gap-2 py-2 px-3 bg-slate-900/60 rounded-lg border border-border/60 text-xs font-mono">
+                      <div className="flex-1 truncate">
+                        <span className="text-[9px] text-slate-500 uppercase block">Sender</span>
+                        <span className="text-sky-400 font-medium">
+                          {isViewer ? maskAccount(selectedTransaction.sender_account) : selectedTransaction.sender_account}
+                        </span>
                       </div>
-                      <span className="text-lg opacity-20">→</span>
-                      <div className="flex-1 text-right">
-                         <span className="text-[8px] uppercase text-muted-foreground font-bold">Receiver</span>
-                          <p className="font-mono text-sm text-primary">
-                            {isViewer ? maskAccount(selectedTransaction.receiver_account) : selectedTransaction.receiver_account}
-                          </p>
+                      <ArrowRight className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                      <div className="flex-1 truncate text-right">
+                        <span className="text-[9px] text-slate-500 uppercase block">Receiver</span>
+                        <span className="text-sky-400 font-medium">
+                          {isViewer ? maskAccount(selectedTransaction.receiver_account) : selectedTransaction.receiver_account}
+                        </span>
                       </div>
                     </div>
-                    <div className="flex justify-between items-end border-t border-border pt-3">
-                       <div>
-                          <span className="text-[8px] uppercase text-muted-foreground font-bold">Timestamp</span>
-                          <p className="text-xs font-mono">{new Date(selectedTransaction.timestamp).toLocaleString()}</p>
-                       </div>
-                       <p className="text-lg font-black italic">₹{selectedTransaction.amount.toLocaleString()}</p>
+
+                    <div className="flex justify-between items-center pt-2">
+                      <span className="text-[10px] font-mono text-slate-400">{new Date(selectedTransaction.timestamp).toLocaleString()}</span>
+                      <span className="text-base font-mono font-bold text-slate-100">₹{selectedTransaction.amount.toLocaleString()}</span>
                     </div>
                   </div>
                 </section>
               )}
 
-              {/* Reasoning Engine (Phase 1) */}
+              {/* Reasoning Engine */}
               {(selectedTransaction?.full_reason || selectedTransaction?.confidence) && (
-                <section className="bg-primary/5 rounded-2xl p-5 border border-primary/20 space-y-4">
+                <section className="bg-sky-500/5 rounded-xl p-4 border border-sky-500/20 space-y-3">
                   <div className="flex justify-between items-center">
-                    <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-primary">Reasoning Engine</h3>
+                    <h3 className="text-[10px] font-semibold uppercase tracking-wider text-sky-400 flex items-center gap-1.5">
+                      <Cpu className="w-3.5 h-3.5" />
+                      Reasoning Engine & Confidence
+                    </h3>
                     {selectedTransaction.confidence && (
                       <span className={twMerge(
-                        "text-[8px] px-2 py-0.5 rounded font-black border",
-                        selectedTransaction.confidence === 'HIGH' ? "bg-green-500/10 text-green-500 border-green-500/20" :
-                        selectedTransaction.confidence === 'MEDIUM' ? "bg-amber-500/10 text-amber-500 border-amber-500/20" :
-                        "bg-red-500/10 text-red-500 border-red-500/20"
+                        "text-[9px] font-mono px-2 py-0.5 rounded font-semibold border uppercase",
+                        selectedTransaction.confidence === 'HIGH' ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30" :
+                        selectedTransaction.confidence === 'MEDIUM' ? "bg-amber-500/15 text-amber-400 border-amber-500/30" :
+                        "bg-rose-500/15 text-rose-400 border-rose-500/30"
                       )}>
-                        CONFIDENCE: {selectedTransaction.confidence}
+                        {selectedTransaction.confidence}
                       </span>
                     )}
                   </div>
                   
-                  <p className="text-sm font-medium leading-relaxed text-foreground italic">
+                  <p className="text-xs leading-relaxed text-slate-200 italic bg-slate-900/40 p-3 rounded-lg border border-border/40">
                     "{selectedTransaction.full_reason}"
                   </p>
-
-                  {/* ML Intelligence Breakdown */}
-                  {selectedTransaction.ml_score !== undefined && (
-                    <div className="grid grid-cols-2 gap-4 pt-2 border-t border-primary/10">
-                      <div>
-                        <span className="text-[8px] uppercase text-muted-foreground font-bold">Rule Engine</span>
-                        <p className="text-sm font-mono font-bold text-foreground">{selectedTransaction.rule_score}</p>
-                      </div>
-                      <div>
-                        <span className="text-[8px] uppercase text-muted-foreground font-bold">ML Predictive</span>
-                        <p className="text-sm font-mono font-bold text-primary">{selectedTransaction.ml_score}</p>
-                      </div>
-                    </div>
-                  )}
 
                   {/* Feature Importance */}
                   {selectedTransaction.ml_feature_importance && (
                     <div className="pt-2 space-y-2">
-                       <span className="text-[8px] uppercase text-muted-foreground font-bold">Model Influence Factors</span>
-                       <div className="space-y-1.5">
-                          {Object.entries(selectedTransaction.ml_feature_importance).slice(0, 6).map(([feature, importance]) => (
-                            <div key={feature} className="space-y-1">
-                               <div className="flex justify-between text-[9px] uppercase font-bold tracking-tight">
-                                  <span>{feature.replace(/_/g, ' ')}</span>
-                                  <span className="opacity-60">{(importance * 100).toFixed(0)}%</span>
-                               </div>
-                               <div className="h-1 w-full bg-primary/10 rounded-full overflow-hidden">
-                                  <div 
-                                    className="h-full bg-primary" 
-                                    style={{ width: `${importance * 100}%` }}
-                                  />
-                               </div>
+                      <span className="text-[10px] uppercase font-semibold text-slate-400">Model Influence Factors</span>
+                      <div className="space-y-2">
+                        {Object.entries(selectedTransaction.ml_feature_importance).slice(0, 5).map(([feature, importance]) => (
+                          <div key={feature} className="space-y-1">
+                            <div className="flex justify-between text-[10px] font-mono">
+                              <span className="text-slate-300">{feature.replace(/_/g, ' ')}</span>
+                              <span className="text-sky-400 font-semibold">{(importance * 100).toFixed(0)}%</span>
                             </div>
-                          ))}
-                       </div>
+                            <div className="h-1 w-full bg-slate-800 rounded-full overflow-hidden">
+                              <div 
+                                className="h-full bg-sky-400" 
+                                style={{ width: `${importance * 100}%` }}
+                              />
+                            </div>
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   )}
                 </section>
@@ -195,65 +191,72 @@ const InvestigationSidebar = ({
                 </section>
               )}
 
-              {/* Action Panel */}
-              <section>
-                <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-primary mb-4">Decision Terminal</h3>
-                <div className="grid grid-cols-2 gap-3">
-                  <ActionButton label="Freeze Account" onClick={() => handleAction('freeze')} disabled={isViewer} className="bg-red-600 hover:bg-red-700 text-[10px]" />
-                  <ActionButton label="Monitor Account" onClick={() => handleAction('monitor')} disabled={isViewer} className="bg-cyan-600 hover:bg-cyan-700 text-[10px]" />
-                  <ActionButton label="Escalate Case" onClick={() => handleAction('flag')} disabled={isViewer} className="bg-amber-600 hover:bg-amber-700 text-[10px]" />
-                  <ActionButton label="Alert Police" onClick={() => handleAction('alert')} disabled={isViewer} className="bg-blue-600 hover:bg-blue-700 text-[10px]" />
-                  <ActionButton label="Close (Resolved)" onClick={() => handleAction('close')} disabled={isViewer} className="bg-green-600 hover:bg-green-700 text-[10px]" />
-                  <ActionButton label="Close (False Pos)" onClick={() => handleAction('close_fp')} disabled={isViewer} className="bg-gray-600 hover:bg-gray-700 text-[10px]" />
+              {/* Action Decision Terminal */}
+              <section className="bg-card border border-border/80 rounded-xl p-4">
+                <h3 className="text-[10px] font-semibold uppercase tracking-wider text-slate-400 mb-3">Decision Terminal</h3>
+                <div className="grid grid-cols-2 gap-2">
+                  <button onClick={() => handleAction('freeze')} disabled={isViewer} className="py-2 px-3 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-40">
+                    Freeze Account
+                  </button>
+                  <button onClick={() => handleAction('monitor')} disabled={isViewer} className="py-2 px-3 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-40">
+                    Monitor Account
+                  </button>
+                  <button onClick={() => handleAction('flag')} disabled={isViewer} className="py-2 px-3 bg-amber-600 hover:bg-amber-500 text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-40">
+                    Escalate Case
+                  </button>
+                  <button onClick={() => handleAction('alert')} disabled={isViewer} className="py-2 px-3 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-40">
+                    Alert Police
+                  </button>
+                  <button onClick={() => handleAction('close')} disabled={isViewer} className="py-2 px-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-40">
+                    Close (Resolved)
+                  </button>
+                  <button onClick={() => handleAction('close_fp')} disabled={isViewer} className="py-2 px-3 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg text-xs font-semibold transition-colors disabled:opacity-40">
+                    Close (False Pos)
+                  </button>
                 </div>
               </section>
 
               {/* Graph Summary */}
               {selectedCase && (
-                <section>
-                  <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-primary mb-4">Graph Topology</h3>
-                  <div className="grid grid-cols-2 gap-2">
-                    <div className="bg-muted/20 p-3 rounded-xl border border-border">
-                       <span className="text-[8px] uppercase text-muted-foreground font-bold">Chain Depth</span>
-                       <p className="text-sm font-bold">{selectedCase.chain.length} Hops</p>
-                    </div>
-                    <div className="bg-muted/20 p-3 rounded-xl border border-border">
-                       <span className="text-[8px] uppercase text-muted-foreground font-bold">Recovery</span>
-                       <p className="text-sm font-bold text-green-500">{recoveryPercent}%</p>
-                    </div>
+                <section className="grid grid-cols-2 gap-3">
+                  <div className="bg-muted/30 p-3 rounded-xl border border-border/80">
+                    <span className="text-[9px] uppercase font-semibold text-slate-400 block">Chain Depth</span>
+                    <span className="text-sm font-mono font-bold text-slate-100">{selectedCase.chain.length} Hops</span>
+                  </div>
+                  <div className="bg-muted/30 p-3 rounded-xl border border-border/80">
+                    <span className="text-[9px] uppercase font-semibold text-slate-400 block">Recovery %</span>
+                    <span className="text-sm font-mono font-bold text-emerald-400">{recoveryPercent}%</span>
                   </div>
                 </section>
               )}
 
               {/* Action Timeline */}
-              <section className="pb-10">
-                <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-primary mb-4">Action Timeline</h3>
-                <div className="space-y-4 border-l border-border ml-2 pl-6">
-                   {actions.length > 0 ? actions.map((action, idx) => (
-                     <div key={action.action_id} className="relative">
-                       <span className="absolute -left-8 top-1 w-4 h-4 rounded-full bg-primary border-4 border-card" />
-                       <div>
-                          <div className="flex justify-between items-center mb-1">
-                             <span className="text-[10px] font-bold uppercase tracking-tighter text-primary">
-                               {action.action_type.replace(/_/g, ' ')}
-                             </span>
-                             <span className="text-[8px] font-mono opacity-50">
-                               {new Date(action.timestamp).toLocaleTimeString()}
-                             </span>
-                          </div>
-                          <p className="text-[10px] text-muted-foreground">
-                            Target: <span className="font-mono text-foreground font-bold">
-                              {isViewer ? maskAccount(action.target) : action.target}
-                            </span>
-                          </p>
-                          <p className="text-[8px] text-muted-foreground mt-0.5">
-                            Role: {action.actor_role}
-                          </p>
-                       </div>
-                     </div>
-                   )) : (
-                     <p className="text-xs text-muted-foreground italic ml-2">No investigative actions recorded.</p>
-                   )}
+              <section className="pb-6">
+                <h3 className="text-[10px] font-semibold uppercase tracking-wider text-slate-400 mb-3">Action History</h3>
+                <div className="space-y-3 border-l border-border/80 ml-2 pl-4">
+                  {actions.length > 0 ? actions.map((action) => (
+                    <div key={action.action_id} className="relative">
+                      <span className="absolute -left-[21px] top-1.5 w-2.5 h-2.5 rounded-full bg-sky-400 border-2 border-card" />
+                      <div>
+                        <div className="flex justify-between items-center mb-0.5">
+                          <span className="text-xs font-mono font-semibold text-sky-400 uppercase">
+                            {action.action_type.replace(/_/g, ' ')}
+                          </span>
+                          <span className="text-[9px] font-mono text-slate-400">
+                            {new Date(action.timestamp).toLocaleTimeString()}
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-slate-300">
+                          Target: <span className="font-mono font-semibold">
+                            {isViewer ? maskAccount(action.target) : action.target}
+                          </span>
+                        </p>
+                        <p className="text-[9px] text-slate-400">Actor Role: {action.actor_role}</p>
+                      </div>
+                    </div>
+                  )) : (
+                    <p className="text-xs text-slate-400 italic">No investigative actions recorded.</p>
+                  )}
                 </div>
               </section>
 
@@ -266,3 +269,4 @@ const InvestigationSidebar = ({
 };
 
 export default InvestigationSidebar;
+
