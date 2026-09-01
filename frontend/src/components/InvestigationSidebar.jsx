@@ -17,6 +17,27 @@ const InvestigationSidebar = ({
 }) => {
   if (!isOpen) return null;
   const isViewer = role !== 'admin';
+  const [evidencePackage, setEvidencePackage] = React.useState(null);
+
+  React.useEffect(() => {
+    if (selectedCase?.evidence_package) {
+      setEvidencePackage(selectedCase.evidence_package);
+    } else if (selectedCase?.case_id) {
+      const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
+      fetch(`${API_BASE}/cases/${selectedCase.case_id}/evidence`)
+        .then(res => res.ok ? res.json() : null)
+        .then(data => { if (data && data.found) setEvidencePackage(data); })
+        .catch(() => {});
+    } else if (selectedTransaction?.tx_id) {
+      const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
+      fetch(`${API_BASE}/transactions/${selectedTransaction.tx_id}/evidence`)
+        .then(res => res.ok ? res.json() : null)
+        .then(data => { if (data && data.found) setEvidencePackage(data); })
+        .catch(() => {});
+    } else {
+      setEvidencePackage(null);
+    }
+  }, [selectedCase, selectedTransaction]);
 
   const totalFraud = selectedCase?.total_fraud_amount || 0;
   const recoverable = selectedCase?.recoverable_amount || 0;
@@ -188,6 +209,50 @@ const InvestigationSidebar = ({
               {selectedTransaction?.risk_factors && (
                 <section>
                   <FactorBreakdown factors={selectedTransaction.risk_factors} />
+                </section>
+              )}
+
+              {/* Evidence Collection Agent (Phase 1) */}
+              {evidencePackage && evidencePackage.evidence && evidencePackage.evidence.length > 0 && (
+                <section className="bg-slate-900/50 rounded-xl p-4 border border-sky-500/20 space-y-3">
+                  <div className="flex justify-between items-center pb-2 border-b border-border/60">
+                    <h3 className="text-[10px] font-semibold uppercase tracking-wider text-sky-400 flex items-center gap-1.5">
+                      <ShieldCheck className="w-3.5 h-3.5 text-sky-400" />
+                      Evidence Collection Agent
+                    </h3>
+                    <span className="text-[9px] font-mono font-semibold px-2 py-0.5 rounded bg-sky-950 text-sky-300 border border-sky-800/60 uppercase">
+                      {evidencePackage.summary?.total_evidence_items || evidencePackage.evidence.length} Facts
+                    </span>
+                  </div>
+
+                  <div className="space-y-2.5 max-h-60 overflow-y-auto pr-1 text-xs">
+                    {evidencePackage.evidence.map((item) => (
+                      <div key={item.id} className="p-2.5 rounded-lg bg-card/80 border border-border/60 space-y-1">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[9px] font-mono font-bold text-slate-400 uppercase tracking-wider">
+                            {item.category}
+                          </span>
+                          <div className="flex items-center gap-1.5">
+                            <span className={twMerge(
+                              "text-[8px] font-mono px-1.5 py-0.5 rounded font-bold uppercase border",
+                              item.severity === 'HIGH' ? "bg-rose-500/15 text-rose-400 border-rose-500/30" :
+                              item.severity === 'MEDIUM' ? "bg-amber-500/15 text-amber-400 border-amber-500/30" :
+                              item.severity === 'LOW' ? "bg-yellow-500/15 text-yellow-400 border-yellow-500/30" :
+                              "bg-sky-500/15 text-sky-400 border-sky-500/30"
+                            )}>
+                              {item.severity}
+                            </span>
+                            <span className="text-[8px] font-mono text-slate-500">
+                              {item.source}
+                            </span>
+                          </div>
+                        </div>
+                        <p className="text-[11px] text-slate-200 leading-snug">
+                          {item.finding}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
                 </section>
               )}
 
