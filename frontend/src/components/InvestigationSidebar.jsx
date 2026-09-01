@@ -18,6 +18,7 @@ const InvestigationSidebar = ({
   if (!isOpen) return null;
   const isViewer = role !== 'admin';
   const [evidencePackage, setEvidencePackage] = React.useState(null);
+  const [contextualReport, setContextualReport] = React.useState(null);
 
   React.useEffect(() => {
     if (selectedCase?.evidence_package) {
@@ -36,6 +37,24 @@ const InvestigationSidebar = ({
         .catch(() => {});
     } else {
       setEvidencePackage(null);
+    }
+
+    if (selectedCase?.contextual_investigation) {
+      setContextualReport(selectedCase.contextual_investigation);
+    } else if (selectedCase?.case_id) {
+      const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
+      fetch(`${API_BASE}/cases/${selectedCase.case_id}/investigation`)
+        .then(res => res.ok ? res.json() : null)
+        .then(data => { if (data && data.found) setContextualReport(data); })
+        .catch(() => {});
+    } else if (selectedTransaction?.tx_id) {
+      const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
+      fetch(`${API_BASE}/transactions/${selectedTransaction.tx_id}/investigation`)
+        .then(res => res.ok ? res.json() : null)
+        .then(data => { if (data && data.found) setContextualReport(data); })
+        .catch(() => {});
+    } else {
+      setContextualReport(null);
     }
   }, [selectedCase, selectedTransaction]);
 
@@ -225,7 +244,7 @@ const InvestigationSidebar = ({
                     </span>
                   </div>
 
-                  <div className="space-y-2.5 max-h-60 overflow-y-auto pr-1 text-xs">
+                  <div className="space-y-2.5 max-h-52 overflow-y-auto pr-1 text-xs">
                     {evidencePackage.evidence.map((item) => (
                       <div key={item.id} className="p-2.5 rounded-lg bg-card/80 border border-border/60 space-y-1">
                         <div className="flex items-center justify-between">
@@ -249,6 +268,68 @@ const InvestigationSidebar = ({
                         </div>
                         <p className="text-[11px] text-slate-200 leading-snug">
                           {item.finding}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              )}
+
+              {/* Contextual Investigation Agent (Phase 2) */}
+              {contextualReport && contextualReport.contextual_findings && contextualReport.contextual_findings.length > 0 && (
+                <section className="bg-slate-900/50 rounded-xl p-4 border border-indigo-500/20 space-y-3">
+                  <div className="flex justify-between items-center pb-2 border-b border-border/60">
+                    <h3 className="text-[10px] font-semibold uppercase tracking-wider text-indigo-400 flex items-center gap-1.5">
+                      <Activity className="w-3.5 h-3.5 text-indigo-400" />
+                      Contextual Investigation Agent
+                    </h3>
+                    <span
+                      title="Rule-based contextual confidence index; not a calibrated probability."
+                      className={twMerge(
+                        "text-[9px] font-mono font-bold px-2 py-0.5 rounded border uppercase cursor-help",
+                        contextualReport.summary?.contextual_severity === 'CRITICAL' ? "bg-rose-500/20 text-rose-300 border-rose-500/40" :
+                        contextualReport.summary?.contextual_severity === 'HIGH' ? "bg-amber-500/20 text-amber-300 border-amber-500/40" :
+                        "bg-indigo-500/20 text-indigo-300 border-indigo-500/40"
+                      )}
+                    >
+                      {contextualReport.summary?.contextual_severity || 'HIGH'} · HEURISTIC INDEX {((contextualReport.summary?.confidence || 0)).toFixed(2)}
+                    </span>
+                  </div>
+
+                  {/* Matched Patterns */}
+                  {contextualReport.patterns && contextualReport.patterns.length > 0 && (
+                    <div className="space-y-1.5">
+                      <span className="text-[9px] font-mono font-bold text-slate-400 uppercase tracking-wider block">
+                        Matched Behavioral Patterns ({contextualReport.patterns.length})
+                      </span>
+                      <div className="flex flex-wrap gap-1.5">
+                        {contextualReport.patterns.map((p) => (
+                          <span key={p.pattern_id} className="text-[9px] font-mono px-2 py-0.5 rounded bg-indigo-950/80 text-indigo-300 border border-indigo-800/60 font-semibold">
+                            {p.pattern_name}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Findings with supporting evidence IDs */}
+                  <div className="space-y-2 max-h-56 overflow-y-auto pr-1 text-xs">
+                    {contextualReport.contextual_findings.map((f) => (
+                      <div key={f.id} className="p-2.5 rounded-lg bg-card/80 border border-border/60 space-y-1">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[9px] font-mono font-bold text-slate-400 uppercase">
+                            {f.id} • {f.type}
+                          </span>
+                          <div className="flex items-center gap-1">
+                            {f.supporting_evidence_ids && f.supporting_evidence_ids.map((evId) => (
+                              <span key={evId} className="text-[8px] font-mono px-1 py-0.2 rounded bg-slate-800 text-sky-400 border border-slate-700">
+                                {evId}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                        <p className="text-[11px] text-slate-200 leading-snug">
+                          {f.finding}
                         </p>
                       </div>
                     ))}
