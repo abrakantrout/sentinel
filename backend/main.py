@@ -33,6 +33,8 @@ from app.services.case_lifecycle_agent import (
     get_case_disposition_history,
     get_case_audit_history,
 )
+from app.services.investigation_orchestrator import investigation_orchestrator
+
 
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -103,6 +105,8 @@ class ConnectionManager:
 
 
 manager = ConnectionManager()
+investigation_orchestrator.broadcast_manager = manager
+
 
 
 def _now_iso() -> str:
@@ -315,13 +319,18 @@ async def process_tx(
         "ml_feature_importance": transaction.get("ml_feature_importance", {})
     }
 
-    await manager.broadcast(tx_event)
-
     if case:
+        case_id = case.get("case_id")
+        if case_id:
+            await investigation_orchestrator.run_investigation(case_id, repo=repo, store=data_store)
         case_event = {"event": "case_updated", **_case_payload(case)}
         await manager.broadcast(case_event)
 
+    if isinstance(repo, PostgreSQLCaseRepository):
+        await repo.session.commit()
+
     return result
+
 
 
 
@@ -331,6 +340,39 @@ async def get_cases(
 ) -> list[dict[str, Any]]:
     case_list = await repo.get_cases()
     return [_case_payload(c) for c in case_list]
+
+
+@app.post("/cases/{case_id}/investigate")
+async def trigger_case_investigation(
+    case_id: str,
+    repo: AbstractCaseRepository = Depends(get_repository)
+) -> dict[str, Any]:
+    """
+    Triggers/re-runs the Phase 9 automated end-to-end investigation pipeline for a given case_id.
+    """
+    record = await investigation_orchestrator.run_investigation(case_id, repo=repo, store=data_store, force_rerun=True)
+    if isinstance(repo, PostgreSQLCaseRepository):
+        await repo.session.commit()
+    return record
+
+
+@app.get("/cases/{case_id}/investigation-status")
+async def get_investigation_status(
+    case_id: str,
+    repo: AbstractCaseRepository = Depends(get_repository)
+) -> dict[str, Any]:
+    """
+    Returns current Phase 9 automated investigation status and stage execution metrics.
+    """
+    if case_id in investigation_orchestrator._active_investigations:
+        return investigation_orchestrator._active_investigations[case_id]
+
+    rpt = await repo.get_investigation_report(case_id, "DECISION_SUPPORT")
+    if rpt and isinstance(rpt.get("report_data"), dict):
+        return rpt["report_data"]
+
+    raise HTTPException(status_code=404, detail=f"No investigation record found for case '{case_id}'")
+
 
 
 
