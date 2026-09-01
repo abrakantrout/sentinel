@@ -17,6 +17,7 @@ from app.services.evidence_agent import collect_evidence, collect_evidence_for_c
 from app.services.contextual_agent import investigate_context, investigate_case, investigate_transaction
 from app.services.regulatory_agent import assess_regulatory_risk, assess_case_regulatory_risk, assess_transaction_regulatory_risk
 from app.services.audit_explanation_agent import generate_audit_explanation, generate_case_audit_explanation, generate_transaction_audit_explanation
+from app.services.analyst_agent import generate_analyst_decision_support, generate_case_analyst_decision_support, generate_transaction_analyst_decision_support
 
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -161,6 +162,7 @@ def _case_payload(case: dict[str, Any]) -> dict[str, Any]:
     contextual_investigation = investigate_context(evidence_package)
     regulatory_assessment = assess_regulatory_risk(evidence_package, contextual_investigation)
     audit_explanation = generate_audit_explanation(evidence_package, contextual_investigation, regulatory_assessment)
+    analyst_decision_support = generate_analyst_decision_support(evidence_package, contextual_investigation, regulatory_assessment, audit_explanation, case_context=case)
 
     return {
         "case_id": case_id,
@@ -180,6 +182,7 @@ def _case_payload(case: dict[str, Any]) -> dict[str, Any]:
         "contextual_investigation": contextual_investigation,
         "regulatory_assessment": regulatory_assessment,
         "audit_explanation": audit_explanation,
+        "analyst_decision_support": analyst_decision_support,
     }
 
 
@@ -194,6 +197,13 @@ class ActionRequest(BaseModel):
     account_id: str | None = None
     target_id: str | None = None
     reason: str | None = None
+
+
+class DispositionRequest(BaseModel):
+    case_id: str | None = None
+    action_code: str
+    analyst_notes: str | None = None
+    risk_acknowledged: bool = False
 
 
 @app.get("/health")
@@ -346,6 +356,156 @@ def get_audit_explanation_post(payload: EvidenceRequest) -> dict[str, Any]:
     contextual_rpt = investigate_context(evidence_pkg)
     regulatory_rpt = assess_regulatory_risk(evidence_pkg, contextual_rpt)
     return generate_audit_explanation(evidence_pkg, contextual_rpt, regulatory_rpt)
+
+
+@app.get("/cases/{case_id}/decision-support")
+def get_case_decision_support(case_id: str) -> dict[str, Any]:
+    """
+    Returns Phase 5 Analyst Decision Support Report for a given case.
+    """
+    return generate_case_analyst_decision_support(case_id, data_store)
+
+
+@app.get("/transactions/{tx_id}/decision-support")
+def get_transaction_decision_support(tx_id: str) -> dict[str, Any]:
+    """
+    Returns Phase 5 Analyst Decision Support Report for a given transaction.
+    """
+    return generate_transaction_analyst_decision_support(tx_id, data_store)
+
+
+@app.post("/decision-support")
+def get_decision_support_post(payload: EvidenceRequest) -> dict[str, Any]:
+    """
+    Universal decision support endpoint supporting target_id, case_id, or tx_id.
+    Validates scope matching if both case_id and tx_id are provided.
+    """
+    target = payload.target_id or payload.case_id or payload.tx_id or ""
+    if payload.case_id and payload.tx_id:
+        tx_obj = data_store.get("transactions", {}).get(payload.tx_id)
+        if tx_obj and tx_obj.get("case_id") and tx_obj.get("case_id") != payload.case_id:
+            return {
+                "found": False,
+                "status": "INVALID_INPUT",
+                "target_id": target,
+                "case_id": payload.case_id,
+                "primary_tx_id": payload.tx_id,
+                "generated_at": _now_iso(),
+                "summary": {
+                    "review_priority": "UNKNOWN",
+                    "regulatory_severity": "UNKNOWN",
+                    "assessment_heuristic_index": 0.0,
+                    "recommended_step_count": 0,
+                    "requires_human_approval": True
+                },
+                "analyst_executive_brief": f"Decision support failed: Mismatched case_id ({payload.case_id}) and primary_tx_id ({payload.tx_id}).",
+                "review_priority": "UNKNOWN",
+                "priority_rationale": "Case and transaction ID scope mismatch.",
+                "recommended_review_steps": [],
+                "disposition_options": [],
+                "uncertainties": ["Input payload contains conflicting case_id and tx_id."],
+                "data_gaps": ["Scope mismatch between case_id and tx_id."],
+                "human_approval_boundary": {
+                    "autonomous_execution": False,
+                    "required_role": "COMPLIANCE_ANALYST"
+                },
+                "audit_trail": {
+                    "source_stages": [],
+                    "input_case_id": payload.case_id,
+                    "input_transaction_id": payload.tx_id,
+                    "generator": "analyst_decision_support_agent",
+                    "generator_version": "phase5-v1",
+                    "deterministic": True
+                }
+            }
+
+    if payload.case_id:
+        return generate_case_analyst_decision_support(payload.case_id, data_store)
+    elif payload.tx_id:
+        return generate_transaction_analyst_decision_support(payload.tx_id, data_store)
+    else:
+        evidence_pkg = collect_evidence(target, data_store)
+        contextual_rpt = investigate_context(evidence_pkg)
+        regulatory_rpt = assess_regulatory_risk(evidence_pkg, contextual_rpt)
+        audit_exp = generate_audit_explanation(evidence_pkg, contextual_rpt, regulatory_rpt)
+        return generate_analyst_decision_support(evidence_pkg, contextual_rpt, regulatory_rpt, audit_exp)
+
+
+@app.post("/cases/{case_id}/disposition")
+def submit_case_disposition(case_id: str, payload: DispositionRequest) -> dict[str, Any]:
+    """
+    Stateless Disposition Intent & Acknowledgement Endpoint.
+    Validates analyst disposition intent against Phase 5 offered options.
+    Does NOT mutate customer/account/transaction state and does NOT perform DB persistence.
+    """
+    case = data_store.get("cases", {}).get(case_id)
+    if not case:
+        return {
+            "ok": False,
+            "status": "INVALID_INPUT",
+            "error": f"Case '{case_id}' not found.",
+            "acknowledged": False
+        }
+
+    if payload.case_id and payload.case_id != case_id:
+        return {
+            "ok": False,
+            "status": "INVALID_INPUT",
+            "error": f"Payload case_id '{payload.case_id}' does not match path case_id '{case_id}'.",
+            "acknowledged": False
+        }
+
+    forbidden_codes = {"FREEZE", "BLOCK", "FILE_STR", "CLOSE_ACCOUNT", "REJECT_TRANSACTION"}
+    if payload.action_code.upper() in forbidden_codes:
+        return {
+            "ok": False,
+            "status": "INVALID_INPUT",
+            "error": f"Forbidden action code '{payload.action_code}'. Phase 5 does not execute autonomous enforcement actions.",
+            "acknowledged": False
+        }
+
+    ds_report = generate_case_analyst_decision_support(case_id, data_store)
+    offered_options = ds_report.get("disposition_options", [])
+    matched_opt = next((o for o in offered_options if isinstance(o, dict) and o.get("action_code") == payload.action_code), None)
+
+    if not matched_opt:
+        return {
+            "ok": False,
+            "status": "INVALID_INPUT",
+            "error": f"Action code '{payload.action_code}' is not offered by Phase 5 decision support for case '{case_id}'.",
+            "acknowledged": False
+        }
+
+    notes = (payload.analyst_notes or "").strip()
+    if matched_opt.get("requires_reason_note") and not notes:
+        return {
+            "ok": False,
+            "status": "INVALID_INPUT",
+            "error": f"Action '{payload.action_code}' requires an analyst note.",
+            "acknowledged": False
+        }
+
+    if matched_opt.get("requires_risk_acknowledgement") and not payload.risk_acknowledged:
+        return {
+            "ok": False,
+            "status": "INVALID_INPUT",
+            "error": f"Action '{payload.action_code}' requires risk_acknowledged = true.",
+            "acknowledged": False
+        }
+
+    return {
+        "ok": True,
+        "status": "SUCCESS",
+        "acknowledged": True,
+        "case_id": case_id,
+        "action_code": payload.action_code,
+        "label": matched_opt.get("label", payload.action_code),
+        "analyst_notes": notes,
+        "risk_acknowledged": payload.risk_acknowledged,
+        "timestamp": _now_iso(),
+        "disposition_type": "STATELESS_INTENT_ACKNOWLEDGEMENT",
+        "message": f"Analyst disposition intent '{payload.action_code}' acknowledged successfully for case '{case_id}'. Final persistent storage will be owned by Phase 7."
+    }
 
 
 @app.get("/export/sentinel_audit.csv")

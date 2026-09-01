@@ -21,6 +21,12 @@ const InvestigationSidebar = ({
   const [contextualReport, setContextualReport] = React.useState(null);
   const [regulatoryReport, setRegulatoryReport] = React.useState(null);
   const [auditExplanation, setAuditExplanation] = React.useState(null);
+  const [decisionSupport, setDecisionSupport] = React.useState(null);
+  const [selectedDispositionCode, setSelectedDispositionCode] = React.useState('');
+  const [analystNotes, setAnalystNotes] = React.useState('');
+  const [riskAcknowledged, setRiskAcknowledged] = React.useState(false);
+  const [dispositionResponse, setDispositionResponse] = React.useState(null);
+  const [isSubmittingDisposition, setIsSubmittingDisposition] = React.useState(false);
 
   React.useEffect(() => {
     if (selectedCase?.evidence_package) {
@@ -93,6 +99,24 @@ const InvestigationSidebar = ({
         .catch(() => {});
     } else {
       setAuditExplanation(null);
+    }
+
+    if (selectedCase?.analyst_decision_support) {
+      setDecisionSupport(selectedCase.analyst_decision_support);
+    } else if (selectedCase?.case_id) {
+      const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
+      fetch(`${API_BASE}/cases/${selectedCase.case_id}/decision-support`)
+        .then(res => res.ok ? res.json() : null)
+        .then(data => { if (data && data.found) setDecisionSupport(data); })
+        .catch(() => {});
+    } else if (selectedTransaction?.tx_id) {
+      const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
+      fetch(`${API_BASE}/transactions/${selectedTransaction.tx_id}/decision-support`)
+        .then(res => res.ok ? res.json() : null)
+        .then(data => { if (data && data.found) setDecisionSupport(data); })
+        .catch(() => {});
+    } else {
+      setDecisionSupport(null);
     }
   }, [selectedCase, selectedTransaction]);
 
@@ -528,6 +552,230 @@ const InvestigationSidebar = ({
                           • {unc}
                         </div>
                       ))}
+                    </div>
+                  )}
+                </section>
+              )}
+
+              {/* Phase 5 — Analyst Decision Support Agent */}
+              {decisionSupport && (
+                <section className="bg-card border border-indigo-900/60 rounded-xl p-4 space-y-3">
+                  <div className="flex items-center justify-between border-b border-indigo-900/40 pb-2">
+                    <h3 className="text-xs font-bold font-mono uppercase tracking-wider text-indigo-400 flex items-center gap-1.5">
+                      <BookOpen className="w-3.5 h-3.5 text-indigo-400" />
+                      Phase 5 — Analyst Decision Support Agent
+                    </h3>
+                    <span
+                      title="Human-in-the-Loop Analyst Decision Support & Review Workflow."
+                      className={twMerge(
+                        "text-[9px] font-mono font-bold px-2 py-0.5 rounded border uppercase cursor-help",
+                        decisionSupport.status === 'SUCCESS' ? "bg-indigo-500/20 text-indigo-300 border-indigo-500/40" :
+                        decisionSupport.status === 'INCOMPLETE_TRACEABILITY' ? "bg-amber-500/20 text-amber-300 border-amber-500/40" :
+                        "bg-slate-700/50 text-slate-300 border-slate-600"
+                      )}
+                    >
+                      {decisionSupport.status}
+                    </span>
+                  </div>
+
+                  {/* Operational Metrics Bar */}
+                  <div className="grid grid-cols-2 gap-2 text-xs">
+                    <div className="p-2 rounded bg-slate-900/60 border border-slate-800 space-y-0.5">
+                      <span className="text-[9px] font-mono font-bold text-slate-400 uppercase tracking-wider block">Operational Priority</span>
+                      <span className={twMerge(
+                        "text-xs font-mono font-bold px-1.5 py-0.5 rounded border inline-block",
+                        decisionSupport.review_priority === 'URGENT' ? "bg-rose-950 text-rose-300 border-rose-800" :
+                        decisionSupport.review_priority === 'HIGH' ? "bg-amber-950 text-amber-300 border-amber-800" :
+                        decisionSupport.review_priority === 'STANDARD' ? "bg-yellow-950 text-yellow-300 border-yellow-800" :
+                        "bg-slate-800 text-slate-300 border-slate-700"
+                      )}>
+                        {decisionSupport.review_priority || 'LOW'}
+                      </span>
+                    </div>
+
+                    <div className="p-2 rounded bg-slate-900/60 border border-slate-800 space-y-0.5">
+                      <span className="text-[9px] font-mono font-bold text-slate-400 uppercase tracking-wider block">Heuristic Index</span>
+                      <span className="text-xs font-mono font-bold text-teal-300 block">
+                        {decisionSupport.summary?.assessment_heuristic_index !== undefined && decisionSupport.summary?.assessment_heuristic_index !== null && decisionSupport.status === 'SUCCESS'
+                          ? decisionSupport.summary.assessment_heuristic_index.toFixed(2)
+                          : 'UNAVAILABLE'}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Human Approval Boundary Badge */}
+                  <div className="p-2 rounded bg-indigo-950/30 border border-indigo-800/40 text-[10px] flex items-center justify-between text-indigo-300">
+                    <span>Human Approval Required: <strong className="text-indigo-200">YES</strong></span>
+                    <span className="font-mono text-[9px] px-1.5 py-0.2 rounded bg-indigo-900/60 border border-indigo-700 text-indigo-200">
+                      Autonomous Execution: DISABLED
+                    </span>
+                  </div>
+
+                  {/* Executive Brief */}
+                  {decisionSupport.analyst_executive_brief && (
+                    <div className="p-2.5 rounded-lg bg-indigo-950/20 border border-indigo-900/40 text-xs">
+                      <span className="text-[9px] font-mono font-bold text-indigo-400 uppercase tracking-wider block mb-1">Analyst Executive Brief</span>
+                      <p className="text-[11px] text-slate-200 leading-snug">
+                        {decisionSupport.analyst_executive_brief}
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Recommended Review Steps */}
+                  {decisionSupport.recommended_review_steps && decisionSupport.recommended_review_steps.length > 0 && (
+                    <div className="space-y-1.5 pt-1">
+                      <span className="text-[9px] font-mono font-bold text-indigo-400 uppercase tracking-wider block">
+                        Recommended Review Steps ({decisionSupport.recommended_review_steps.length})
+                      </span>
+                      <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1 text-xs">
+                        {decisionSupport.recommended_review_steps.map((step) => (
+                          <div key={step.step_id} className="p-2 rounded bg-card/80 border border-border/60 space-y-1">
+                            <div className="flex items-center justify-between">
+                              <span className="text-[9px] font-mono font-bold text-indigo-300 uppercase">
+                                {step.step_id} • {step.category}
+                              </span>
+                              <span className="text-[8px] font-mono px-1.5 py-0.2 rounded bg-slate-800 text-amber-300 border border-slate-700">
+                                PRIORITY: {step.priority}
+                              </span>
+                            </div>
+                            <span className="text-[11px] font-bold text-slate-100 block">
+                              {step.action_label}
+                            </span>
+                            <p className="text-[10px] text-slate-300 leading-snug">
+                              {step.description}
+                            </p>
+                            <div className="flex flex-wrap gap-1 pt-0.5">
+                              {step.supporting_evidence_ids && step.supporting_evidence_ids.map((evId) => (
+                                <span key={evId} title="Evidence ID" className="text-[8px] font-mono px-1 py-0.2 rounded bg-slate-800 text-sky-400 border border-slate-700">
+                                  {evId}
+                                </span>
+                              ))}
+                              {step.supporting_context_finding_ids && step.supporting_context_finding_ids.map((ctxId) => (
+                                <span key={ctxId} title="Context Finding ID" className="text-[8px] font-mono px-1 py-0.2 rounded bg-indigo-950 text-indigo-300 border border-indigo-800/60">
+                                  {ctxId}
+                                </span>
+                              ))}
+                              {step.supporting_context_pattern_ids && step.supporting_context_pattern_ids.map((patId) => (
+                                <span key={patId} title="Matched Context Pattern" className="text-[8px] font-mono px-1 py-0.2 rounded bg-amber-950/80 text-amber-300 border border-amber-800/60">
+                                  PAT:{patId}
+                                </span>
+                              ))}
+                              {step.supporting_regulatory_ids && step.supporting_regulatory_ids.map((regId) => (
+                                <span key={regId} title="Regulatory Indicator ID" className="text-[8px] font-mono px-1 py-0.2 rounded bg-purple-950 text-purple-300 border border-purple-800/60">
+                                  {regId}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Disposition Options Form (Stateless Analyst Intent) */}
+                  {selectedCase && decisionSupport.disposition_options && (
+                    <div className="pt-2 border-t border-indigo-900/40 space-y-2 text-xs">
+                      <span className="text-[9px] font-mono font-bold text-indigo-400 uppercase tracking-wider block">
+                        Analyst Disposition Terminal (Stateless Intent)
+                      </span>
+                      <form onSubmit={async (e) => {
+                        e.preventDefault();
+                        if (!selectedCase?.case_id || !selectedDispositionCode) return;
+                        setIsSubmittingDisposition(true);
+                        setDispositionResponse(null);
+                        const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
+                        try {
+                          const res = await fetch(`${API_BASE}/cases/${selectedCase.case_id}/disposition`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                              case_id: selectedCase.case_id,
+                              action_code: selectedDispositionCode,
+                              analyst_notes: analystNotes,
+                              risk_acknowledged: riskAcknowledged
+                            })
+                          });
+                          const data = await res.json();
+                          setDispositionResponse(data);
+                        } catch (err) {
+                          setDispositionResponse({ ok: false, error: 'Network error submitting disposition.' });
+                        } finally {
+                          setIsSubmittingDisposition(false);
+                        }
+                      }} className="space-y-2">
+                        <div>
+                          <label className="text-[10px] text-slate-400 block mb-1">Select Disposition Option:</label>
+                          <select
+                            value={selectedDispositionCode}
+                            onChange={(e) => {
+                              setSelectedDispositionCode(e.target.value);
+                              setDispositionResponse(null);
+                            }}
+                            className="w-full bg-slate-900 border border-slate-700 text-slate-200 text-xs rounded p-1.5"
+                          >
+                            <option value="">-- Choose Disposition Intent --</option>
+                            {decisionSupport.disposition_options.map((opt) => (
+                              <option key={opt.action_code} value={opt.action_code}>
+                                {opt.label} {opt.requires_risk_acknowledgement ? '(Requires Risk Ack)' : ''}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        {selectedDispositionCode && (
+                          <>
+                            <div>
+                              <label className="text-[10px] text-slate-400 block mb-1">Analyst Rationale / Notes:</label>
+                              <textarea
+                                value={analystNotes}
+                                onChange={(e) => setAnalystNotes(e.target.value)}
+                                placeholder="Enter rationale for compliance record..."
+                                rows={2}
+                                className="w-full bg-slate-900 border border-slate-700 text-slate-200 text-xs rounded p-1.5"
+                              />
+                            </div>
+
+                            {decisionSupport.disposition_options.find(o => o.action_code === selectedDispositionCode)?.requires_risk_acknowledgement && (
+                              <label className="flex items-center gap-2 text-[10px] text-amber-300 bg-amber-950/40 p-1.5 rounded border border-amber-800">
+                                <input
+                                  type="checkbox"
+                                  checked={riskAcknowledged}
+                                  onChange={(e) => setRiskAcknowledged(e.target.checked)}
+                                  className="rounded border-slate-700"
+                                />
+                                I acknowledge compliance risk and confirm escalation.
+                              </label>
+                            )}
+
+                            <button
+                              type="submit"
+                              disabled={isSubmittingDisposition || isViewer}
+                              className="w-full py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs rounded transition-colors disabled:opacity-40"
+                            >
+                              {isSubmittingDisposition ? 'Submitting...' : 'Submit Analyst Disposition Intent'}
+                            </button>
+                          </>
+                        )}
+                      </form>
+
+                      {dispositionResponse && (
+                        <div className={twMerge(
+                          "p-2 rounded border text-[10px]",
+                          dispositionResponse.ok ? "bg-emerald-950/60 border-emerald-800 text-emerald-300" : "bg-rose-950/60 border-rose-800 text-rose-300"
+                        )}>
+                          {dispositionResponse.ok ? (
+                            <div>
+                              <strong>✓ Disposition Intent Acknowledged</strong>
+                              <p className="mt-0.5 leading-snug">{dispositionResponse.message}</p>
+                            </div>
+                          ) : (
+                            <div>
+                              <strong>✗ Disposition Rejected</strong>
+                              <p className="mt-0.5 leading-snug">{dispositionResponse.error || 'Validation error.'}</p>
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   )}
                 </section>
