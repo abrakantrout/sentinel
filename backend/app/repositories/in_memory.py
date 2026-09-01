@@ -22,13 +22,21 @@ class InMemoryCaseRepository(AbstractCaseRepository):
         self._audit_log: List[Dict[str, Any]] = []
         self._idempotency_index: Dict[str, Dict[str, Any]] = {}
         self._locked_cases: set = set()
+        self._accounts: Dict[str, Dict[str, Any]] = {}
+        self._transactions: Dict[str, Dict[str, Any]] = {}
+        self._reports: Dict[str, Dict[str, Any]] = {}
 
         if store is not None:
             self._cases = store.setdefault("cases", {})
             self._dispositions = store.setdefault("dispositions", {})
             self._audit_log = store.setdefault("audit_log", [])
+            self._accounts = store.setdefault("accounts", {})
+            self._transactions = store.setdefault("transactions", {})
+            self._reports = store.setdefault("investigation_reports", {})
+
 
     async def get_case_by_id(self, case_id: str) -> Optional[Dict[str, Any]]:
+
         case = self._cases.get(case_id)
         return copy.deepcopy(case) if case else None
 
@@ -117,5 +125,74 @@ class InMemoryCaseRepository(AbstractCaseRepository):
         return True
 
     async def save_investigation_report(self, report_record: Dict[str, Any]) -> bool:
-        # In-memory report index simulated
+        case_id = report_record["case_id"]
+        if case_id not in self._cases:
+            raise KeyError(f"Case '{case_id}' not found.")
+        report_type = report_record["report_type"]
+        key = f"{case_id}::{report_type}"
+        self._reports[key] = copy.deepcopy(report_record)
         return True
+
+    async def get_investigation_report(self, case_id: str, report_type: str) -> Optional[Dict[str, Any]]:
+        key = f"{case_id}::{report_type}"
+        rpt = self._reports.get(key)
+        return copy.deepcopy(rpt) if rpt else None
+
+    async def get_investigation_reports_by_case_id(self, case_id: str) -> List[Dict[str, Any]]:
+        rpts = [copy.deepcopy(r) for k, r in self._reports.items() if r.get("case_id") == case_id]
+        rpts.sort(key=lambda x: (x.get("created_at", ""), x.get("report_id", "")))
+        return rpts
+
+
+    async def get_account(self, account_id: str) -> Optional[Dict[str, Any]]:
+        acc = self._accounts.get(account_id)
+        return copy.deepcopy(acc) if acc else None
+
+    async def save_account(self, account_record: Dict[str, Any]) -> bool:
+        acc_id = account_record["account_id"]
+        self._accounts[acc_id] = copy.deepcopy(account_record)
+        return True
+
+    async def get_transaction(self, tx_id: str) -> Optional[Dict[str, Any]]:
+        tx = self._transactions.get(tx_id)
+        return copy.deepcopy(tx) if tx else None
+
+    async def save_transaction(self, tx_record: Dict[str, Any]) -> bool:
+        tx_id = tx_record["tx_id"]
+        self._transactions[tx_id] = copy.deepcopy(tx_record)
+        return True
+
+    async def save_transaction_and_case(
+        self,
+        accounts: List[Dict[str, Any]],
+        tx_record: Dict[str, Any],
+        case_record: Optional[Dict[str, Any]]
+    ) -> bool:
+        for acc in accounts:
+            acc_id = acc["account_id"]
+            if acc_id not in self._accounts:
+                self._accounts[acc_id] = copy.deepcopy(acc)
+        tx_id = tx_record["tx_id"]
+        self._transactions[tx_id] = copy.deepcopy(tx_record)
+        if case_record:
+            case_id = case_record["case_id"]
+            self._cases[case_id] = copy.deepcopy(case_record)
+        return True
+
+    async def get_cases(self) -> List[Dict[str, Any]]:
+        cases = [copy.deepcopy(c) for c in self._cases.values()]
+        cases.sort(key=lambda x: str(x.get("created_at", "")), reverse=True)
+        return cases
+
+    async def get_recent_transactions(self, limit: int = 20) -> List[Dict[str, Any]]:
+        txs = [copy.deepcopy(t) for t in self._transactions.values()]
+        txs.sort(key=lambda x: str(x.get("timestamp") or x.get("created_at", "")), reverse=True)
+        return txs[:limit]
+
+    async def get_all_transactions(self) -> List[Dict[str, Any]]:
+        txs = [copy.deepcopy(t) for t in self._transactions.values()]
+        txs.sort(key=lambda x: str(x.get("timestamp") or x.get("created_at", "")))
+        return txs
+
+    async def get_all_audit_events(self) -> List[Dict[str, Any]]:
+        return [copy.deepcopy(a) for a in self._audit_log]

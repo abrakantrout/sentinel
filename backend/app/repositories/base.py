@@ -61,5 +61,71 @@ class AbstractCaseRepository(ABC):
 
     @abstractmethod
     async def save_investigation_report(self, report_record: Dict[str, Any]) -> bool:
-        """Saves an investigation report artifact associated with a case."""
+        """Saves or updates an investigation report artifact associated with a case."""
+        pass
+
+    @abstractmethod
+    async def get_investigation_report(self, case_id: str, report_type: str) -> Optional[Dict[str, Any]]:
+        """Fetch investigation report by case_id and report_type."""
+        pass
+
+    @abstractmethod
+    async def get_investigation_reports_by_case_id(self, case_id: str) -> List[Dict[str, Any]]:
+        """Fetch all investigation reports for a given case_id."""
+        pass
+
+
+    @abstractmethod
+    async def get_account(self, account_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch account record by account_id."""
+        pass
+
+    @abstractmethod
+    async def save_account(self, account_record: Dict[str, Any]) -> bool:
+        """Saves or updates an account entity."""
+        pass
+
+    @abstractmethod
+    async def get_transaction(self, tx_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch transaction record by tx_id."""
+        pass
+
+    @abstractmethod
+    async def save_transaction(self, tx_record: Dict[str, Any]) -> bool:
+        """Saves a transaction entity."""
+        pass
+
+    @abstractmethod
+    async def save_transaction_and_case(
+        self,
+        accounts: List[Dict[str, Any]],
+        tx_record: Dict[str, Any],
+        case_record: Optional[Dict[str, Any]]
+    ) -> bool:
+        """
+        Atomically executes in one database transaction:
+        1. Account creation/update for all provided accounts.
+        2. Transaction creation.
+        3. Case creation/update (if case_record is present).
+        """
+        pass
+
+    @abstractmethod
+    async def get_cases(self) -> List[Dict[str, Any]]:
+        """Fetch all cases ordered by created_at descending."""
+        pass
+
+    @abstractmethod
+    async def get_recent_transactions(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """Fetch recent transactions for WebSocket hydration."""
+        pass
+
+    @abstractmethod
+    async def get_all_transactions(self) -> List[Dict[str, Any]]:
+        """Fetch all transactions for CSV export."""
+        pass
+
+    @abstractmethod
+    async def get_all_audit_events(self) -> List[Dict[str, Any]]:
+        """Fetch all audit events/actions for CSV export."""
         pass

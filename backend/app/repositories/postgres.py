@@ -8,11 +8,38 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
 
+from app.models.account import Account
+from app.models.transaction import Transaction
 from app.models.case import Case
 from app.models.disposition import Disposition
 from app.models.audit_event import AuditEvent
 from app.models.investigation_report import InvestigationReport
 from app.repositories.base import AbstractCaseRepository
+
+
+def _account_to_dict(a: Account) -> Dict[str, Any]:
+    return {
+        "account_id": a.account_id,
+        "kyc_status": a.kyc_status,
+        "risk_score": float(a.risk_score or 0.0),
+        "created_at": a.created_at.isoformat() if a.created_at else None,
+        "updated_at": a.updated_at.isoformat() if a.updated_at else None
+    }
+
+
+def _transaction_to_dict(t: Transaction) -> Dict[str, Any]:
+    return {
+        "tx_id": t.tx_id,
+        "sender_account": t.sender_account_id,
+        "receiver_account": t.receiver_account_id,
+        "amount": float(t.amount or 0.0),
+        "currency": t.currency,
+        "channel": t.channel,
+        "timestamp": t.timestamp.isoformat() if t.timestamp else None,
+        "raw_payload": t.raw_payload or {},
+        "created_at": t.created_at.isoformat() if t.created_at else None
+    }
+
 
 
 def _parse_iso(val: Any) -> Optional[datetime]:
@@ -81,7 +108,18 @@ def _audit_to_dict(a: AuditEvent) -> Dict[str, Any]:
     }
 
 
+def _report_to_dict(r: InvestigationReport) -> Dict[str, Any]:
+    return {
+        "report_id": r.report_id,
+        "case_id": r.case_id,
+        "report_type": r.report_type,
+        "report_data": r.report_data or {},
+        "created_at": r.created_at.isoformat() if r.created_at else None
+    }
+
+
 class PostgreSQLCaseRepository(AbstractCaseRepository):
+
     """
     PostgreSQL persistence repository implementing pessimistic FOR UPDATE row locking,
     atomic multi-statement transactions, idempotency handling, and append-only audit tracking.
@@ -242,14 +280,233 @@ class PostgreSQLCaseRepository(AbstractCaseRepository):
         return True
 
     async def save_investigation_report(self, report_record: Dict[str, Any]) -> bool:
-        created_dt = _parse_iso(report_record.get("created_at")) or datetime.now(timezone.utc)
-        rpt_obj = InvestigationReport(
-            report_id=report_record["report_id"],
-            case_id=report_record["case_id"],
-            report_type=report_record["report_type"],
-            report_data=report_record["report_data"],
-            created_at=created_dt
+        """
+        Upserts an InvestigationReport for (case_id, report_type).
+        If case_id does not exist, foreign key constraint raises IntegrityError.
+        """
+        try:
+            case_id = report_record["case_id"]
+            report_type = report_record["report_type"]
+            created_dt = _parse_iso(report_record.get("created_at")) or datetime.now(timezone.utc)
+            rpt_data = report_record.get("report_data", report_record)
+
+            stmt = select(InvestigationReport).filter(
+                InvestigationReport.case_id == case_id,
+                InvestigationReport.report_type == report_type
+            )
+            res = await self.session.execute(stmt)
+            rpt_obj = res.scalar_one_or_none()
+
+            if rpt_obj:
+                rpt_obj.report_data = rpt_data
+                rpt_obj.created_at = created_dt
+            else:
+                report_id = report_record.get("report_id") or f"RPT-{case_id}-{report_type}"
+                rpt_obj = InvestigationReport(
+                    report_id=report_id,
+                    case_id=case_id,
+                    report_type=report_type,
+                    report_data=rpt_data,
+                    created_at=created_dt
+                )
+                self.session.add(rpt_obj)
+
+            await self.session.flush()
+            return True
+        except IntegrityError:
+            await self.session.rollback()
+            raise
+
+    async def get_investigation_report(self, case_id: str, report_type: str) -> Optional[Dict[str, Any]]:
+        stmt = select(InvestigationReport).filter(
+            InvestigationReport.case_id == case_id,
+            InvestigationReport.report_type == report_type
         )
-        self.session.add(rpt_obj)
+        res = await self.session.execute(stmt)
+        rpt_obj = res.scalar_one_or_none()
+        return _report_to_dict(rpt_obj) if rpt_obj else None
+
+    async def get_investigation_reports_by_case_id(self, case_id: str) -> List[Dict[str, Any]]:
+        stmt = select(InvestigationReport).filter(
+            InvestigationReport.case_id == case_id
+        ).order_by(InvestigationReport.created_at.asc(), InvestigationReport.report_id.asc())
+        res = await self.session.execute(stmt)
+        reports = res.scalars().all()
+        return [_report_to_dict(r) for r in reports]
+
+
+    async def get_account(self, account_id: str) -> Optional[Dict[str, Any]]:
+        stmt = select(Account).filter(Account.account_id == account_id)
+        res = await self.session.execute(stmt)
+        acc_obj = res.scalar_one_or_none()
+        return _account_to_dict(acc_obj) if acc_obj else None
+
+    async def save_account(self, account_record: Dict[str, Any]) -> bool:
+        acc_id = account_record["account_id"]
+        stmt = select(Account).filter(Account.account_id == acc_id)
+        res = await self.session.execute(stmt)
+        acc_obj = res.scalar_one_or_none()
+        now = datetime.now(timezone.utc)
+        if not acc_obj:
+            acc_obj = Account(
+                account_id=acc_id,
+                kyc_status=account_record.get("kyc_status", "PENDING"),
+                risk_score=float(account_record.get("risk_score", 0.0)),
+                created_at=_parse_iso(account_record.get("created_at")) or now,
+                updated_at=now
+            )
+            self.session.add(acc_obj)
+        else:
+            if "kyc_status" in account_record:
+                acc_obj.kyc_status = account_record["kyc_status"]
+            if "risk_score" in account_record:
+                acc_obj.risk_score = float(account_record["risk_score"])
+            acc_obj.updated_at = now
         await self.session.flush()
         return True
+
+    async def get_transaction(self, tx_id: str) -> Optional[Dict[str, Any]]:
+        stmt = select(Transaction).filter(Transaction.tx_id == tx_id)
+        res = await self.session.execute(stmt)
+        tx_obj = res.scalar_one_or_none()
+        return _transaction_to_dict(tx_obj) if tx_obj else None
+
+    async def save_transaction(self, tx_record: Dict[str, Any]) -> bool:
+        tx_id = tx_record["tx_id"]
+        stmt = select(Transaction).filter(Transaction.tx_id == tx_id)
+        res = await self.session.execute(stmt)
+        tx_obj = res.scalar_one_or_none()
+        now = datetime.now(timezone.utc)
+        ts_dt = _parse_iso(tx_record.get("timestamp")) or now
+        if not tx_obj:
+            tx_obj = Transaction(
+                tx_id=tx_id,
+                sender_account_id=tx_record["sender_account"],
+                receiver_account_id=tx_record["receiver_account"],
+                amount=float(tx_record.get("amount", 0.0)),
+                currency=tx_record.get("currency", "INR"),
+                channel=tx_record.get("channel", "UPI"),
+                timestamp=ts_dt,
+                raw_payload=tx_record.get("raw_payload", tx_record),
+                created_at=now
+            )
+            self.session.add(tx_obj)
+            await self.session.flush()
+        return True
+
+    async def save_transaction_and_case(
+        self,
+        accounts: List[Dict[str, Any]],
+        tx_record: Dict[str, Any],
+        case_record: Optional[Dict[str, Any]]
+    ) -> bool:
+        """
+        Atomically persists accounts, transaction, and case entities in one DB transaction session.
+        Flushes all SQL statements so FK constraints are verified before commit.
+        """
+        try:
+            now = datetime.now(timezone.utc)
+
+            # 1. Accounts
+            for acc in accounts:
+                acc_id = acc.get("account_id")
+                if not acc_id:
+                    continue
+                acc_res = await self.session.execute(select(Account).filter(Account.account_id == acc_id))
+                acc_obj = acc_res.scalar_one_or_none()
+                if not acc_obj:
+                    acc_obj = Account(
+                        account_id=acc_id,
+                        kyc_status=acc.get("kyc_status", "PENDING"),
+                        risk_score=float(acc.get("risk_score", 0.0)),
+                        created_at=_parse_iso(acc.get("created_at")) or now,
+                        updated_at=now
+                    )
+                    self.session.add(acc_obj)
+
+            await self.session.flush()
+
+            # 2. Transaction
+            tx_id = tx_record["tx_id"]
+            tx_res = await self.session.execute(select(Transaction).filter(Transaction.tx_id == tx_id))
+            tx_obj = tx_res.scalar_one_or_none()
+            ts_dt = _parse_iso(tx_record.get("timestamp")) or now
+            if not tx_obj:
+                tx_obj = Transaction(
+                    tx_id=tx_id,
+                    sender_account_id=tx_record["sender_account"],
+                    receiver_account_id=tx_record["receiver_account"],
+                    amount=float(tx_record.get("amount", 0.0)),
+                    currency=tx_record.get("currency", "INR"),
+                    channel=tx_record.get("channel", "UPI"),
+                    timestamp=ts_dt,
+                    raw_payload=tx_record.get("raw_payload", tx_record),
+                    created_at=now
+                )
+                self.session.add(tx_obj)
+
+            await self.session.flush()
+
+            # 3. Case (if present)
+            if case_record and "case_id" in case_record:
+                case_id = case_record["case_id"]
+                case_res = await self.session.execute(select(Case).filter(Case.case_id == case_id))
+                case_obj = case_res.scalar_one_or_none()
+
+                raw_status = case_record.get("status", "NEW")
+                valid_states = ("NEW", "UNDER_REVIEW", "CDD_PENDING", "ESCALATED", "RESOLVED_DISMISSED", "RESOLVED_APPROVED")
+                c_status = raw_status if raw_status in valid_states else ("ESCALATED" if raw_status == "HIGH_RISK" else "NEW")
+
+                if not case_obj:
+                    case_created_dt = _parse_iso(case_record.get("created_at")) or now
+                    case_obj = Case(
+                        case_id=case_id,
+                        primary_tx_id=tx_id,
+                        status=c_status,
+                        risk_level=str(case_record.get("risk_level", "LOW")),
+                        golden_window_minutes=int(case_record.get("golden_window_minutes", 30)),
+                        total_fraud_amount=float(case_record.get("total_fraud_amount", 0.0)),
+                        recoverable_amount=float(case_record.get("recoverable_amount", 0.0)),
+                        created_at=case_created_dt,
+                        updated_at=case_created_dt
+                    )
+                    self.session.add(case_obj)
+                else:
+                    if raw_status in valid_states:
+                        case_obj.status = raw_status
+                    elif raw_status == "HIGH_RISK":
+                        case_obj.status = "ESCALATED"
+                    case_obj.risk_level = str(case_record.get("risk_level", case_obj.risk_level))
+                    case_obj.total_fraud_amount = float(case_record.get("total_fraud_amount", case_obj.total_fraud_amount))
+                    case_obj.updated_at = now
+
+            await self.session.flush()
+            return True
+
+        except IntegrityError:
+            await self.session.rollback()
+            raise
+
+    async def get_cases(self) -> List[Dict[str, Any]]:
+        stmt = select(Case).order_by(Case.created_at.desc(), Case.case_id.desc())
+        res = await self.session.execute(stmt)
+        cases = res.scalars().all()
+        return [_case_to_dict(c) for c in cases]
+
+    async def get_recent_transactions(self, limit: int = 20) -> List[Dict[str, Any]]:
+        stmt = select(Transaction).order_by(Transaction.timestamp.desc(), Transaction.created_at.desc()).limit(limit)
+        res = await self.session.execute(stmt)
+        txs = res.scalars().all()
+        return [_transaction_to_dict(t) for t in txs]
+
+    async def get_all_transactions(self) -> List[Dict[str, Any]]:
+        stmt = select(Transaction).order_by(Transaction.timestamp.asc(), Transaction.created_at.asc())
+        res = await self.session.execute(stmt)
+        txs = res.scalars().all()
+        return [_transaction_to_dict(t) for t in txs]
+
+    async def get_all_audit_events(self) -> List[Dict[str, Any]]:
+        stmt = select(AuditEvent).order_by(AuditEvent.timestamp.asc())
+        res = await self.session.execute(stmt)
+        events = res.scalars().all()
+        return [_audit_to_dict(e) for e in events]

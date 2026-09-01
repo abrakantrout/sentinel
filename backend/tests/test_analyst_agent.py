@@ -476,7 +476,16 @@ class TestAnalystDecisionSupportAPI(unittest.TestCase):
         data_store["graphs"].clear()
         data_store["accounts"].clear()
         data_store["actions"].clear()
+        data_store["dispositions"] = {}
+        data_store["audit_log"] = []
+        from main import get_repository
+        from app.repositories.in_memory import InMemoryCaseRepository
+        app.dependency_overrides[get_repository] = lambda: InMemoryCaseRepository(data_store)
         self.client = TestClient(app)
+
+    def tearDown(self):
+        app.dependency_overrides.clear()
+
 
     def test_api_1_get_case_decision_support_success(self):
         """API Test 1: GET /cases/{case_id}/decision-support returns SUCCESS."""

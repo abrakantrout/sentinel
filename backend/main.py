@@ -7,9 +7,16 @@ import random
 import string
 
 import uvicorn
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, Depends
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, Depends, HTTPException
+
 from pydantic import BaseModel
 
+import os
+from typing import Any, Optional
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.db.session import get_db_session
+from app.repositories.postgres import PostgreSQLCaseRepository
 from app.core.data_store import data_store
 from app.repositories.base import AbstractCaseRepository
 from app.repositories.in_memory import InMemoryCaseRepository
@@ -30,12 +37,27 @@ from app.services.case_lifecycle_agent import (
 from fastapi.middleware.cors import CORSMiddleware
 
 
-def get_repository() -> AbstractCaseRepository:
+def get_repository(
+    session: Optional[AsyncSession] = Depends(get_db_session)
+) -> AbstractCaseRepository:
     """
-    FastAPI Dependency Provider for AbstractCaseRepository.
-    Defaults to InMemoryCaseRepository(data_store) for backward compatibility.
+    FastAPI Dependency Provider for AbstractCaseRepository (Phase 8 Step 1).
+    - If AsyncSession is active: returns PostgreSQLCaseRepository(session).
+    - If AsyncSession is None and in dev/test mode: returns InMemoryCaseRepository(data_store).
+    - If in production mode or PostgreSQL configured but session is None: FAILS FAST (raises RuntimeError).
     """
+    sentinel_mode = os.getenv("SENTINEL_MODE", "development").lower()
+    db_url = os.getenv("DATABASE_URL")
+    is_postgres_env = bool(db_url and db_url.startswith("postgresql"))
+
+    if session is not None:
+        return PostgreSQLCaseRepository(session)
+
+    if sentinel_mode == "production" or is_postgres_env:
+        raise RuntimeError("POSTGRESQL PERSISTENCE FAILURE: Database session unavailable in production mode.")
+
     return InMemoryCaseRepository(data_store)
+
 
 
 @asynccontextmanager
@@ -180,6 +202,12 @@ def _case_payload(case: dict[str, Any]) -> dict[str, Any]:
     audit_explanation = generate_audit_explanation(evidence_package, contextual_investigation, regulatory_assessment)
     analyst_decision_support = generate_analyst_decision_support(evidence_package, contextual_investigation, regulatory_assessment, audit_explanation, case_context=case)
 
+    raw_rl = case.get("risk_level", "LOW")
+    try:
+        rl_val: Any = float(raw_rl)
+    except (ValueError, TypeError):
+        rl_val = str(raw_rl)
+
     return {
         "case_id": case_id,
         "status": case.get("status", "NEW"),
@@ -190,9 +218,10 @@ def _case_payload(case: dict[str, Any]) -> dict[str, Any]:
         "recoverable_amount": float(case.get("recoverable_amount", 0.0)),
         "recovery_pct": float(case.get("recovery_pct", 0.0)),
         "actionLog": _normalize_action_log(case),
-        "risk_level": float(case.get("risk_level", 0.0)),
+        "risk_level": rl_val,
         "golden_window_minutes": int(case.get("golden_window_minutes", 0)),
         "total_fraud_amount": float(case.get("total_fraud_amount", 0.0)),
+
         "chain": case.get("chain", []),
         "evidence_package": evidence_package,
         "contextual_investigation": contextual_investigation,
@@ -222,6 +251,8 @@ class DispositionRequest(BaseModel):
     analyst_id: str | None = "ANALYST-001"
     analyst_role: str | None = "COMPLIANCE_ANALYST"
     risk_acknowledged: bool = False
+    idempotency_key: str | None = None
+
 
 
 @app.get("/health")
@@ -230,11 +261,40 @@ def health_check() -> dict[str, str]:
 
 
 @app.post("/transaction")
-async def process_tx(request: Request) -> dict[str, Any]:
-    tx = await request.json()
+async def process_tx(
+    request: Request,
+    repo: AbstractCaseRepository = Depends(get_repository)
+) -> dict[str, Any]:
+    try:
+        tx = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
+
+    if not isinstance(tx, dict) or not tx.get("tx_id"):
+        raise HTTPException(status_code=400, detail="Invalid transaction payload structure")
+
     result = run_pipeline(tx, data_store)
 
+
     transaction = result.get("transaction") or {}
+    case = result.get("case")
+
+    sender_id = transaction.get("sender_account")
+    receiver_id = transaction.get("receiver_account")
+    accounts_to_save = []
+
+    if sender_id:
+        acc_s = data_store.get("accounts", {}).get(sender_id) or {"account_id": sender_id}
+        accounts_to_save.append(acc_s)
+    if receiver_id and receiver_id != sender_id:
+        acc_r = data_store.get("accounts", {}).get(receiver_id) or {"account_id": receiver_id}
+        accounts_to_save.append(acc_r)
+
+    await repo.save_transaction_and_case(accounts_to_save, transaction, case)
+
+    if isinstance(repo, PostgreSQLCaseRepository):
+        await repo.session.commit()
+
     tx_event = {
         "event": "tx_scored",
         "tx_id": transaction.get("tx_id", ""),
@@ -257,7 +317,6 @@ async def process_tx(request: Request) -> dict[str, Any]:
 
     await manager.broadcast(tx_event)
 
-    case = result.get("case")
     if case:
         case_event = {"event": "case_updated", **_case_payload(case)}
         await manager.broadcast(case_event)
@@ -265,9 +324,14 @@ async def process_tx(request: Request) -> dict[str, Any]:
     return result
 
 
+
 @app.get("/cases")
-def get_cases() -> list[dict[str, Any]]:
-    return [_case_payload(case) for case in data_store.get("cases", {}).values()]
+async def get_cases(
+    repo: AbstractCaseRepository = Depends(get_repository)
+) -> list[dict[str, Any]]:
+    case_list = await repo.get_cases()
+    return [_case_payload(c) for c in case_list]
+
 
 
 @app.get("/cases/{case_id}/evidence")
@@ -449,17 +513,82 @@ def get_decision_support_post(payload: EvidenceRequest) -> dict[str, Any]:
         return generate_analyst_decision_support(evidence_pkg, contextual_rpt, regulatory_rpt, audit_exp)
 
 
+async def _ensure_pg_case_seeded(session: AsyncSession, case_dict: dict[str, Any]) -> None:
+    if not case_dict or not isinstance(case_dict, dict):
+        return
+    case_id = case_dict.get("case_id")
+    if not case_id:
+        return
+    from sqlalchemy import select
+    from app.models.case import Case
+    from app.models.account import Account
+    from app.models.transaction import Transaction
+
+    res = await session.execute(select(Case).filter(Case.case_id == case_id))
+    case_obj = res.scalar_one_or_none()
+    if case_obj:
+        target_status = case_dict.get("status", "NEW")
+        if case_obj.status != target_status:
+            case_obj.status = target_status
+            await session.flush()
+        return
+
+    now = datetime.now(timezone.utc)
+    primary_tx_id = case_dict.get("primary_tx_id") or f"TX-SEED-{case_id}"
+    acc1_id = case_dict.get("sender_account") or f"ACC-SND-{case_id}"
+    acc2_id = case_dict.get("receiver_account") or f"ACC-RCV-{case_id}"
+
+    for acc_id in [acc1_id, acc2_id]:
+        acc_res = await session.execute(select(Account).filter(Account.account_id == acc_id))
+        if not acc_res.scalar_one_or_none():
+            session.add(Account(account_id=acc_id, created_at=now, updated_at=now))
+
+    tx_res = await session.execute(select(Transaction).filter(Transaction.tx_id == primary_tx_id))
+    if not tx_res.scalar_one_or_none():
+        session.add(Transaction(
+            tx_id=primary_tx_id,
+            sender_account_id=acc1_id,
+            receiver_account_id=acc2_id,
+            amount=float(case_dict.get("total_fraud_amount", 1000.0)),
+            channel="UPI",
+            timestamp=now,
+            raw_payload={},
+            created_at=now
+        ))
+
+    session.add(Case(
+        case_id=case_id,
+        primary_tx_id=primary_tx_id,
+        status=case_dict.get("status", "NEW"),
+        risk_level=str(case_dict.get("risk_level", "LOW")),
+        golden_window_minutes=int(case_dict.get("golden_window_minutes", 30)),
+        total_fraud_amount=float(case_dict.get("total_fraud_amount", 0.0)),
+        recoverable_amount=float(case_dict.get("recoverable_amount", 0.0)),
+        created_at=now,
+        updated_at=now
+    ))
+    await session.flush()
+
+
+
 @app.post("/cases/{case_id}/disposition")
-def submit_case_disposition(
+async def submit_case_disposition(
     case_id: str,
     payload: DispositionRequest,
     repo: AbstractCaseRepository = Depends(get_repository)
 ) -> dict[str, Any]:
     """
-    Stateful Case Lifecycle Disposition Endpoint (Phase 7 Repository Adapter).
+    Stateful Case Lifecycle Disposition Endpoint (Phase 7 Repository Adapter / Phase 8 Step 1 DI).
     """
-    case = data_store.get("cases", {}).get(case_id)
-    if not case:
+    case_dict = None
+    if isinstance(repo, PostgreSQLCaseRepository):
+        case_dict = await repo.get_case_by_id(case_id)
+    if not case_dict:
+        case_dict = data_store.get("cases", {}).get(case_id)
+        if case_dict and isinstance(repo, PostgreSQLCaseRepository):
+            await _ensure_pg_case_seeded(repo.session, case_dict)
+
+    if not case_dict:
         return {
             "ok": False,
             "status": "INVALID_INPUT",
@@ -487,8 +616,9 @@ def submit_case_disposition(
     # Resolve Phase 5 decision support report
     ds_report = generate_case_analyst_decision_support(case_id, data_store)
 
-    # Invoke repository-backed stateful disposition service
-    res = submit_case_disposition_service(
+    # Invoke repository-backed stateful disposition service directly (async)
+    service = CaseLifecycleService(repo)
+    res = await service.submit_case_disposition(
         case_id=case_id,
         action_code=payload.action_code,
         analyst_notes=payload.analyst_notes or "",
@@ -496,21 +626,40 @@ def submit_case_disposition(
         analyst_id=payload.analyst_id or "ANALYST-001",
         analyst_role=payload.analyst_role or "COMPLIANCE_ANALYST",
         risk_acknowledged=payload.risk_acknowledged,
-        repository=repo
+        idempotency_key=payload.idempotency_key
     )
+
+
+    if res.get("ok"):
+        c_ds = data_store.get("cases", {}).get(case_id)
+        if c_ds and res.get("new_case_status"):
+            c_ds["status"] = res["new_case_status"]
+            if res.get("disposition"):
+                c_ds.setdefault("actions_taken", []).insert(0, res["disposition"])
+
+        if isinstance(repo, PostgreSQLCaseRepository):
+            await repo.session.commit()
+
     return res
 
 
 @app.get("/cases/{case_id}/history")
-def get_case_history_endpoint(
+async def get_case_history_endpoint(
     case_id: str,
     repo: AbstractCaseRepository = Depends(get_repository)
 ) -> dict[str, Any]:
     """
     Returns complete chronological lifecycle and disposition audit history for a given case via repository.
     """
-    case = data_store.get("cases", {}).get(case_id)
-    if not case:
+    case_dict = None
+    if isinstance(repo, PostgreSQLCaseRepository):
+        case_dict = await repo.get_case_by_id(case_id)
+    if not case_dict:
+        case_dict = data_store.get("cases", {}).get(case_id)
+        if case_dict and isinstance(repo, PostgreSQLCaseRepository):
+            await _ensure_pg_case_seeded(repo.session, case_dict)
+
+    if not case_dict:
         return {
             "found": False,
             "status": "INSUFFICIENT_DATA",
@@ -520,15 +669,18 @@ def get_case_history_endpoint(
             "audit_history": []
         }
 
-    dispositions = get_case_disposition_history(case_id, repository=repo)
-    audit_log = get_case_audit_history(case_id, repository=repo)
+    service = CaseLifecycleService(repo)
+    hist = await service.get_case_history(case_id)
+
+    dispositions = hist.get("disposition_history", [])
+    audit_log = hist.get("audit_history", [])
 
     return {
         "found": True,
         "status": "SUCCESS",
         "case_id": case_id,
-        "primary_tx_id": case.get("primary_tx_id"),
-        "current_case_status": case.get("status", "NEW"),
+        "primary_tx_id": case_dict.get("primary_tx_id"),
+        "current_case_status": case_dict.get("status", "NEW"),
         "disposition_count": len(dispositions),
         "audit_count": len(audit_log),
         "disposition_history": dispositions,
@@ -536,10 +688,24 @@ def get_case_history_endpoint(
     }
 
 
+
+
+def _sanitize_csv_field(val: Any) -> str:
+    """Escapes leading formula injection characters for CSV security."""
+    if val is None:
+        return ""
+    s = str(val)
+    if s and s[0] in ("=", "+", "-", "@", "\t", "\r"):
+        return f"'{s}"
+    return s
+
+
 @app.get("/export/sentinel_audit.csv")
-def export_csv():
+async def export_csv(
+    repo: AbstractCaseRepository = Depends(get_repository)
+):
     """
-    Generates and streams a CSV audit log from the in-memory store.
+    Generates and streams a CSV audit log from authoritative repository store.
     Includes all transactions and investigative actions.
     Browser handles this as a native file download.
     """
@@ -561,26 +727,34 @@ def export_csv():
         'Amount (INR)', 'Risk Score', 'Risk Level', 'Case ID'
     ])
 
-    tx_store = data_store.get("transactions", {})
-    for tx in tx_store.values():
+    tx_list = await repo.get_all_transactions()
+    for tx in tx_list:
         score = float(tx.get("risk_score", 0))
         level = "HIGH_RISK" if score >= 70 else "MEDIUM" if score >= 40 else "LOW"
         writer.writerow([
-            tx.get("tx_id", ""),
-            tx.get("timestamp", ""),
-            tx.get("channel", ""),
-            tx.get("sender_account", ""),
-            tx.get("receiver_account", ""),
-            tx.get("amount", ""),
+            _sanitize_csv_field(tx.get("tx_id", "")),
+            _sanitize_csv_field(tx.get("timestamp", "")),
+            _sanitize_csv_field(tx.get("channel", "")),
+            _sanitize_csv_field(tx.get("sender_account") or tx.get("sender_account_id") or ""),
+            _sanitize_csv_field(tx.get("receiver_account") or tx.get("receiver_account_id") or ""),
+            tx.get("amount", 0.0),
             score,
             level,
-            tx.get("case_id", "")
+            _sanitize_csv_field(tx.get("case_id", ""))
         ])
 
     # ── Section 2: Investigative Actions ─────────────────────────────────────
     all_actions = []
-    for case in data_store.get("cases", {}).values():
-        all_actions.extend(case.get("actions_taken", []))
+    cases = await repo.get_cases()
+    for c in cases:
+        c_hist = await repo.get_case_history(c.get("case_id", ""))
+        c_actions = c_hist.get("disposition_history", []) if isinstance(c_hist, dict) else []
+        all_actions.extend(c_actions)
+
+
+    if not all_actions:
+        audit_events = await repo.get_all_audit_events()
+        all_actions = audit_events
 
     if all_actions:
         writer.writerow([])
@@ -591,14 +765,14 @@ def export_csv():
         ])
         for a in all_actions:
             writer.writerow([
-                a.get("action_id", ""),
-                a.get("case_id", ""),
-                a.get("action_type", ""),
-                a.get("target", a.get("target_id", "GLOBAL")),
-                a.get("status", "ACK"),
-                a.get("reason", "System Action"),
-                a.get("latency", ""),
-                a.get("timestamp", "")
+                _sanitize_csv_field(a.get("disposition_id") or a.get("audit_id") or a.get("action_id", "")),
+                _sanitize_csv_field(a.get("case_id", "")),
+                _sanitize_csv_field(a.get("action_code") or a.get("event_type") or a.get("action_type", "")),
+                _sanitize_csv_field(a.get("target") or a.get("analyst_id") or "GLOBAL"),
+                _sanitize_csv_field(a.get("new_case_status") or a.get("status", "ACK")),
+                _sanitize_csv_field(a.get("analyst_notes") or a.get("reason", "System Action")),
+                a.get("latency", 0),
+                _sanitize_csv_field(a.get("disposition_timestamp") or a.get("timestamp", ""))
             ])
 
     output.seek(0)
@@ -610,6 +784,7 @@ def export_csv():
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'}
     )
+
 
 
 def _record_action(case_id: str, action_type: str, target_id: str, status: str, reason: str | None = None) -> dict[str, Any]:
@@ -909,9 +1084,16 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     try:
         await websocket.send_json({"event": "connected", "status": "LIVE"})
 
-        # Hydrate newly connected WS client with recent transactions
-        tx_store = data_store.get("transactions", {})
-        recent_txs = list(tx_store.values())[-20:]
+        # Hydrate newly connected WS client with recent transactions using short-lived DB session
+        recent_txs = []
+        try:
+            async for session in get_db_session():
+                repo = get_repository(session=session)
+                recent_txs = await repo.get_recent_transactions(limit=20)
+                break
+        except Exception:
+            recent_txs = list(data_store.get("transactions", {}).values())[-20:]
+
         for transaction in recent_txs:
             tx_event = {
                 "event": "tx_scored",
@@ -920,8 +1102,8 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 "case_id": transaction.get("case_id", ""),
                 "risk_score": float(transaction.get("risk_score", 0.0)),
                 "amount": float(transaction.get("amount", 0.0)),
-                "sender_account": transaction.get("sender_account", "UNKNOWN"),
-                "receiver_account": transaction.get("receiver_account", "UNKNOWN"),
+                "sender_account": transaction.get("sender_account") or transaction.get("sender_account_id") or "UNKNOWN",
+                "receiver_account": transaction.get("receiver_account") or transaction.get("receiver_account_id") or "UNKNOWN",
                 "channel": transaction.get("channel", "UPI"),
                 "risk_factors": transaction.get("risk_factors", []),
                 "threshold": transaction.get("threshold", "LOW"),
@@ -940,6 +1122,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         manager.disconnect(websocket)
     except Exception:
         manager.disconnect(websocket)
+
 
 
 if __name__ == "__main__":

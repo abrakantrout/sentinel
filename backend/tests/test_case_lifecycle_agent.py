@@ -27,6 +27,10 @@ from app.services.case_lifecycle_agent import (
     STATE_RESOLVED_DISMISSED,
     STATE_RESOLVED_APPROVED,
 )
+from app.repositories.in_memory import InMemoryCaseRepository
+from main import app, get_repository
+
+
 
 
 def _run_full_pipeline(tx: Dict[str, Any], store: Dict[str, Any]) -> Dict[str, Any]:
@@ -674,6 +678,7 @@ class TestCaseLifecycleAPI(unittest.TestCase):
         data_store["actions"].clear()
         data_store["dispositions"] = {}
         data_store["audit_log"] = []
+        app.dependency_overrides[get_repository] = lambda: InMemoryCaseRepository(data_store)
         self.client = TestClient(app)
 
         self.tx = {
@@ -686,6 +691,10 @@ class TestCaseLifecycleAPI(unittest.TestCase):
         }
         self.pipe = _run_full_pipeline(self.tx, data_store)
         self.case_id = self.pipe["case_id"]
+
+    def tearDown(self):
+        app.dependency_overrides.clear()
+
 
     def test_api_1_stateful_disposition_success(self):
         """API Test 1: POST /cases/{case_id}/disposition executes stateful transition."""
