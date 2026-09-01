@@ -18,6 +18,11 @@ from app.services.contextual_agent import investigate_context, investigate_case,
 from app.services.regulatory_agent import assess_regulatory_risk, assess_case_regulatory_risk, assess_transaction_regulatory_risk
 from app.services.audit_explanation_agent import generate_audit_explanation, generate_case_audit_explanation, generate_transaction_audit_explanation
 from app.services.analyst_agent import generate_analyst_decision_support, generate_case_analyst_decision_support, generate_transaction_analyst_decision_support
+from app.services.case_lifecycle_agent import (
+    submit_case_disposition as submit_case_disposition_service,
+    get_case_disposition_history,
+    get_case_audit_history,
+)
 
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -203,6 +208,8 @@ class DispositionRequest(BaseModel):
     case_id: str | None = None
     action_code: str
     analyst_notes: str | None = None
+    analyst_id: str | None = "ANALYST-001"
+    analyst_role: str | None = "COMPLIANCE_ANALYST"
     risk_acknowledged: bool = False
 
 
@@ -434,9 +441,9 @@ def get_decision_support_post(payload: EvidenceRequest) -> dict[str, Any]:
 @app.post("/cases/{case_id}/disposition")
 def submit_case_disposition(case_id: str, payload: DispositionRequest) -> dict[str, Any]:
     """
-    Stateless Disposition Intent & Acknowledgement Endpoint.
-    Validates analyst disposition intent against Phase 5 offered options.
-    Does NOT mutate customer/account/transaction state and does NOT perform DB persistence.
+    Stateful Case Lifecycle Disposition Endpoint (Phase 6).
+    Validates analyst intent against Phase 5 offered options, executes state transition on case object,
+    persists disposition record in data_store['dispositions'], and appends immutable audit event to data_store['audit_log'].
     """
     case = data_store.get("cases", {}).get(case_id)
     if not case:
@@ -456,55 +463,60 @@ def submit_case_disposition(case_id: str, payload: DispositionRequest) -> dict[s
         }
 
     forbidden_codes = {"FREEZE", "BLOCK", "FILE_STR", "CLOSE_ACCOUNT", "REJECT_TRANSACTION"}
-    if payload.action_code.upper() in forbidden_codes:
+    if payload.action_code and payload.action_code.upper() in forbidden_codes:
         return {
             "ok": False,
             "status": "INVALID_INPUT",
-            "error": f"Forbidden action code '{payload.action_code}'. Phase 5 does not execute autonomous enforcement actions.",
+            "error": f"Forbidden action code '{payload.action_code}'. Phase 6 does not execute autonomous enforcement actions.",
             "acknowledged": False
         }
 
+    # Resolve Phase 5 decision support report
     ds_report = generate_case_analyst_decision_support(case_id, data_store)
-    offered_options = ds_report.get("disposition_options", [])
-    matched_opt = next((o for o in offered_options if isinstance(o, dict) and o.get("action_code") == payload.action_code), None)
 
-    if not matched_opt:
+    # Invoke Phase 6 stateful disposition service
+    res = submit_case_disposition_service(
+        case_id=case_id,
+        action_code=payload.action_code,
+        analyst_notes=payload.analyst_notes or "",
+        decision_support_report=ds_report,
+        analyst_id=payload.analyst_id or "ANALYST-001",
+        analyst_role=payload.analyst_role or "COMPLIANCE_ANALYST",
+        risk_acknowledged=payload.risk_acknowledged,
+        store=data_store
+    )
+    return res
+
+
+@app.get("/cases/{case_id}/history")
+def get_case_history_endpoint(case_id: str) -> dict[str, Any]:
+    """
+    Returns complete chronological lifecycle and disposition audit history for a given case.
+    """
+    case = data_store.get("cases", {}).get(case_id)
+    if not case:
         return {
-            "ok": False,
-            "status": "INVALID_INPUT",
-            "error": f"Action code '{payload.action_code}' is not offered by Phase 5 decision support for case '{case_id}'.",
-            "acknowledged": False
+            "found": False,
+            "status": "INSUFFICIENT_DATA",
+            "error": f"Case '{case_id}' not found.",
+            "case_id": case_id,
+            "disposition_history": [],
+            "audit_history": []
         }
 
-    notes = (payload.analyst_notes or "").strip()
-    if matched_opt.get("requires_reason_note") and not notes:
-        return {
-            "ok": False,
-            "status": "INVALID_INPUT",
-            "error": f"Action '{payload.action_code}' requires an analyst note.",
-            "acknowledged": False
-        }
-
-    if matched_opt.get("requires_risk_acknowledgement") and not payload.risk_acknowledged:
-        return {
-            "ok": False,
-            "status": "INVALID_INPUT",
-            "error": f"Action '{payload.action_code}' requires risk_acknowledged = true.",
-            "acknowledged": False
-        }
+    dispositions = get_case_disposition_history(case_id, store=data_store)
+    audit_log = get_case_audit_history(case_id, store=data_store)
 
     return {
-        "ok": True,
+        "found": True,
         "status": "SUCCESS",
-        "acknowledged": True,
         "case_id": case_id,
-        "action_code": payload.action_code,
-        "label": matched_opt.get("label", payload.action_code),
-        "analyst_notes": notes,
-        "risk_acknowledged": payload.risk_acknowledged,
-        "timestamp": _now_iso(),
-        "disposition_type": "STATELESS_INTENT_ACKNOWLEDGEMENT",
-        "message": f"Analyst disposition intent '{payload.action_code}' acknowledged successfully for case '{case_id}'. Final persistent storage will be owned by Phase 7."
+        "primary_tx_id": case.get("primary_tx_id"),
+        "current_case_status": case.get("status", "NEW"),
+        "disposition_count": len(dispositions),
+        "audit_count": len(audit_log),
+        "disposition_history": dispositions,
+        "audit_history": audit_log
     }
 
 

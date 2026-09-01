@@ -27,6 +27,27 @@ const InvestigationSidebar = ({
   const [riskAcknowledged, setRiskAcknowledged] = React.useState(false);
   const [dispositionResponse, setDispositionResponse] = React.useState(null);
   const [isSubmittingDisposition, setIsSubmittingDisposition] = React.useState(false);
+  const [caseHistory, setCaseHistory] = React.useState(null);
+
+  const fetchCaseHistory = React.useCallback((caseId) => {
+    if (!caseId) {
+      setCaseHistory(null);
+      return;
+    }
+    const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
+    fetch(`${API_BASE}/cases/${caseId}/history`)
+      .then(res => res.ok ? res.json() : null)
+      .then(data => { if (data && data.found) setCaseHistory(data); })
+      .catch(() => {});
+  }, []);
+
+  React.useEffect(() => {
+    if (selectedCase?.case_id) {
+      fetchCaseHistory(selectedCase.case_id);
+    } else {
+      setCaseHistory(null);
+    }
+  }, [selectedCase?.case_id, fetchCaseHistory]);
 
   React.useEffect(() => {
     if (selectedCase?.evidence_package) {
@@ -185,8 +206,16 @@ const InvestigationSidebar = ({
                 <div className="flex items-center gap-3 pt-1">
                   <RiskBadge score={selectedCase.risk_level} />
                   <GoldenTimer minutes={selectedCase.golden_window_minutes} />
-                  <span className="text-[10px] font-mono font-semibold px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700/60 uppercase">
-                    {selectedCase.status}
+                  <span className={twMerge(
+                    "text-[10px] font-mono font-bold px-2 py-0.5 rounded border uppercase",
+                    (caseHistory?.current_case_status || selectedCase.status) === 'RESOLVED_DISMISSED' ? "bg-slate-800 text-slate-300 border-slate-700" :
+                    (caseHistory?.current_case_status || selectedCase.status) === 'RESOLVED_APPROVED' ? "bg-emerald-950 text-emerald-300 border-emerald-800" :
+                    (caseHistory?.current_case_status || selectedCase.status) === 'CDD_PENDING' ? "bg-yellow-950 text-yellow-300 border-yellow-800" :
+                    (caseHistory?.current_case_status || selectedCase.status) === 'ESCALATED' ? "bg-rose-950 text-rose-300 border-rose-800" :
+                    (caseHistory?.current_case_status || selectedCase.status) === 'UNDER_REVIEW' ? "bg-sky-950 text-sky-300 border-sky-800" :
+                    "bg-indigo-950 text-indigo-300 border-indigo-800"
+                  )}>
+                    STATUS: {caseHistory?.current_case_status || selectedCase.status}
                   </span>
                 </div>
               )}
@@ -672,11 +701,11 @@ const InvestigationSidebar = ({
                     </div>
                   )}
 
-                  {/* Disposition Options Form (Stateless Analyst Intent) */}
+                  {/* Disposition Options Form (Stateful Case Lifecycle Intent) */}
                   {selectedCase && decisionSupport.disposition_options && (
                     <div className="pt-2 border-t border-indigo-900/40 space-y-2 text-xs">
                       <span className="text-[9px] font-mono font-bold text-indigo-400 uppercase tracking-wider block">
-                        Analyst Disposition Terminal (Stateless Intent)
+                        Analyst Disposition Terminal (Stateful Lifecycle Engine)
                       </span>
                       <form onSubmit={async (e) => {
                         e.preventDefault();
@@ -692,11 +721,16 @@ const InvestigationSidebar = ({
                               case_id: selectedCase.case_id,
                               action_code: selectedDispositionCode,
                               analyst_notes: analystNotes,
+                              analyst_id: "ANALYST-001",
+                              analyst_role: "COMPLIANCE_ANALYST",
                               risk_acknowledged: riskAcknowledged
                             })
                           });
                           const data = await res.json();
                           setDispositionResponse(data);
+                          if (data.ok) {
+                            fetchCaseHistory(selectedCase.case_id);
+                          }
                         } catch (err) {
                           setDispositionResponse({ ok: false, error: 'Network error submitting disposition.' });
                         } finally {
@@ -765,7 +799,7 @@ const InvestigationSidebar = ({
                         )}>
                           {dispositionResponse.ok ? (
                             <div>
-                              <strong>✓ Disposition Intent Acknowledged</strong>
+                              <strong>✓ Disposition Executed & State Persisted</strong>
                               <p className="mt-0.5 leading-snug">{dispositionResponse.message}</p>
                             </div>
                           ) : (
@@ -776,6 +810,76 @@ const InvestigationSidebar = ({
                           )}
                         </div>
                       )}
+                    </div>
+                  )}
+
+                  {/* Analyst Audit History Feed (Phase 6 Persistent Audit Log) */}
+                  {caseHistory?.audit_history && caseHistory.audit_history.length > 0 && (
+                    <div className="pt-3 border-t border-indigo-900/40 space-y-2">
+                      <span className="text-[9px] font-mono font-bold text-indigo-400 uppercase tracking-wider block">
+                        Analyst Audit History Feed ({caseHistory.audit_history.length})
+                      </span>
+                      <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
+                        {caseHistory.audit_history.map((item) => (
+                          <div key={item.audit_id} className="p-2 rounded-lg bg-slate-900/80 border border-indigo-900/50 space-y-1 text-xs">
+                            <div className="flex items-center justify-between">
+                              <span className="text-[9px] font-mono font-bold text-indigo-300">
+                                {item.analyst_id} • {item.analyst_role}
+                              </span>
+                              <span className="text-[8px] font-mono text-slate-400">
+                                {new Date(item.timestamp).toLocaleTimeString()}
+                              </span>
+                            </div>
+
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-indigo-950 text-indigo-200 border border-indigo-800 font-bold uppercase">
+                                {item.action_code}
+                              </span>
+                              <span className="text-[9px] font-mono text-slate-400">
+                                {item.previous_case_status} → <strong className="text-teal-300">{item.new_case_status}</strong>
+                              </span>
+                            </div>
+
+                            {item.analyst_notes && (
+                              <p className="text-[10px] text-slate-300 italic bg-slate-950/40 p-1.5 rounded border border-slate-800 leading-snug">
+                                "{item.analyst_notes}"
+                              </p>
+                            )}
+
+                            {item.risk_acknowledged && (
+                              <span className="inline-block text-[8px] font-mono px-1 py-0.2 rounded bg-amber-950 text-amber-300 border border-amber-800">
+                                Risk Ack: CONFIRMED
+                              </span>
+                            )}
+
+                            {/* Traceability Chips */}
+                            {item.traceability_chain && (
+                              <div className="flex flex-wrap gap-1 pt-1 border-t border-slate-800/60">
+                                {item.traceability_chain.supporting_evidence_ids?.map((evId) => (
+                                  <span key={evId} title="Evidence ID" className="text-[8px] font-mono px-1 py-0.2 rounded bg-slate-800 text-sky-400 border border-slate-700">
+                                    {evId}
+                                  </span>
+                                ))}
+                                {item.traceability_chain.supporting_context_finding_ids?.map((ctxId) => (
+                                  <span key={ctxId} title="Context Finding ID" className="text-[8px] font-mono px-1 py-0.2 rounded bg-indigo-950 text-indigo-300 border border-indigo-800/60">
+                                    {ctxId}
+                                  </span>
+                                ))}
+                                {item.traceability_chain.supporting_context_pattern_ids?.map((patId) => (
+                                  <span key={patId} title="Matched Context Pattern" className="text-[8px] font-mono px-1 py-0.2 rounded bg-amber-950/80 text-amber-300 border border-amber-800/60">
+                                    PAT:{patId}
+                                  </span>
+                                ))}
+                                {item.traceability_chain.supporting_regulatory_ids?.map((regId) => (
+                                  <span key={regId} title="Regulatory Indicator ID" className="text-[8px] font-mono px-1 py-0.2 rounded bg-purple-950 text-purple-300 border border-purple-800/60">
+                                    {regId}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   )}
                 </section>
