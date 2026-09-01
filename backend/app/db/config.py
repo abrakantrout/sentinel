@@ -17,5 +17,7 @@ def get_database_url(async_driver: bool = True) -> str:
     if env_url:
         if async_driver and env_url.startswith("postgresql://"):
             return env_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        elif not async_driver and env_url.startswith("postgresql+asyncpg://"):
+            return env_url.replace("postgresql+asyncpg://", "postgresql+psycopg2://", 1)
         return env_url
     return DEFAULT_ASYNC_DATABASE_URL if async_driver else DEFAULT_SYNC_DATABASE_URL

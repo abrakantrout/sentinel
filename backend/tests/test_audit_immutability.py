@@ -13,6 +13,8 @@ import os
 import unittest
 from datetime import datetime, timezone
 import asyncio
+from contextlib import asynccontextmanager
+
 
 from app.repositories.in_memory import InMemoryCaseRepository
 from app.services.case_lifecycle_agent import CaseLifecycleService
@@ -106,18 +108,76 @@ class TestPostgreSQLAuditImmutabilityLive(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.db_url = get_database_url()
-        cls.is_postgres = cls.db_url.startswith("postgresql")
-        if not cls.is_postgres:
-            print("\n[INFO] TestPostgreSQLAuditImmutabilityLive: PostgreSQL not configured. Skipping live trigger tests.")
+        cls.db_url = os.getenv("DATABASE_URL")
+        if not cls.db_url:
+            cls.db_url = get_database_url(async_driver=True)
+        cls.is_postgres = cls.db_url and cls.db_url.startswith("postgresql")
+
+    def setUp(self):
+        if not self.is_postgres:
+            self.skipTest("DATABASE-LEVEL TRIGGER ENFORCEMENT UNVERIFIED (PostgreSQL offline)")
+
+    @asynccontextmanager
+    async def get_session(self):
+        from app.db.session import get_async_engine, get_async_session_factory
+        engine = get_async_engine(self.db_url)
+        factory = get_async_session_factory(engine)
+        async with factory() as session:
+            try:
+                yield session
+            finally:
+                pass
+        await engine.dispose()
 
     def test_pg_01_audit_tampering_rejected_by_trigger(self):
         """Step 4.7: Adversarial test - PostgreSQL trigger rejects UPDATE and DELETE on audit_events."""
-        if not self.is_postgres:
-            self.skipTest("DATABASE-LEVEL TRIGGER ENFORCEMENT UNVERIFIED (PostgreSQL offline)")
-        
-        # This test executes only when PostgreSQL is running
-        pass
+        async def run_test():
+            from sqlalchemy import text
+            from app.models.account import Account
+            from app.models.transaction import Transaction
+            from app.models.case import Case
+            from app.models.audit_event import AuditEvent
+
+            now = datetime.now(timezone.utc)
+            async with self.get_session() as session:
+                acc = Account(account_id="ACC-IMM-LIVE-01", created_at=now, updated_at=now)
+                tx = Transaction(tx_id="TX-IMM-LIVE-01", sender_account_id="ACC-IMM-LIVE-01", receiver_account_id="ACC-IMM-LIVE-01", amount=100.0, channel="UPI", timestamp=now, raw_payload={}, created_at=now)
+                c = Case(case_id="CASE-IMM-LIVE-01", primary_tx_id="TX-IMM-LIVE-01", created_at=now, updated_at=now)
+                audit = AuditEvent(
+                    audit_id="AUD-IMM-LIVE-01",
+                    case_id="CASE-IMM-LIVE-01",
+                    primary_tx_id="TX-IMM-LIVE-01",
+                    analyst_id="A1",
+                    analyst_role="R1",
+                    action_code="CODE",
+                    previous_case_status="NEW",
+                    new_case_status="UNDER_REVIEW",
+                    analyst_notes="Immutable original",
+                    decision_support_summary={},
+                    traceability_chain={},
+                    timestamp=now,
+                    created_at=now
+                )
+                session.add_all([acc, tx, c, audit])
+                await session.commit()
+
+            # Attempt UPDATE
+            async with self.get_session() as session:
+                with self.assertRaises(Exception) as ctx:
+                    await session.execute(text("UPDATE audit_events SET analyst_notes = 'TAMPERED' WHERE audit_id = 'AUD-IMM-LIVE-01'"))
+                    await session.commit()
+                err_str = str(ctx.exception)
+                self.assertTrue("55000" in err_str or "ObjectNotInPrerequisiteStateError" in err_str or "immutability violation" in err_str.lower())
+
+            # Attempt DELETE
+            async with self.get_session() as session:
+                with self.assertRaises(Exception) as ctx:
+                    await session.execute(text("DELETE FROM audit_events WHERE audit_id = 'AUD-IMM-LIVE-01'"))
+                    await session.commit()
+                err_str = str(ctx.exception)
+                self.assertTrue("55000" in err_str or "ObjectNotInPrerequisiteStateError" in err_str or "immutability violation" in err_str.lower())
+
+        asyncio.run(run_test())
 
 
 if __name__ == "__main__":
