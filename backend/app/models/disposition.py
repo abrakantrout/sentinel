@@ -15,13 +15,13 @@ class Disposition(Base):
     disposition_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     case_id: Mapped[str] = mapped_column(
         String(64),
-        ForeignKey("cases.case_id"),
+        ForeignKey("cases.case_id", ondelete="RESTRICT"),
         nullable=False,
         index=True
     )
     primary_tx_id: Mapped[str] = mapped_column(
         String(64),
-        ForeignKey("transactions.tx_id"),
+        ForeignKey("transactions.tx_id", ondelete="RESTRICT"),
         nullable=False
     )
     action_code: Mapped[str] = mapped_column(String(64), nullable=False)
