@@ -170,10 +170,23 @@ class InvestigationOrchestrator:
             case_record = store.get("cases", {}).get(case_id)
             if case_record:
                 try:
-                    await repo.save_case(case_record)
+                    tx_id = case_record.get("primary_tx_id")
+                    if tx_id and store and tx_id in store.get("transactions", {}):
+                        tx_obj = store["transactions"][tx_id]
+                        sender_id = tx_obj.get("sender_account") or tx_obj.get("sender_account_id")
+                        receiver_id = tx_obj.get("receiver_account") or tx_obj.get("receiver_account_id")
+                        accs = []
+                        if sender_id:
+                            accs.append(store.get("accounts", {}).get(sender_id, {"account_id": sender_id}))
+                        if receiver_id and receiver_id != sender_id:
+                            accs.append(store.get("accounts", {}).get(receiver_id, {"account_id": receiver_id}))
+                        await repo.save_transaction_and_case(accs, tx_obj, case_record)
+                    else:
+                        await repo.save_case(case_record)
                     await repo.commit_transaction()
                 except Exception:
                     pass
+
 
         evidence_pkg: Optional[Dict[str, Any]] = None
         contextual_rpt: Optional[Dict[str, Any]] = None

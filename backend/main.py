@@ -15,7 +15,7 @@ import os
 from typing import Any, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.session import get_db_session
+from app.db.session import get_db_session, close_async_engine
 from app.repositories.postgres import PostgreSQLCaseRepository
 from app.core.data_store import data_store
 from app.repositories.base import AbstractCaseRepository
@@ -65,18 +65,36 @@ def get_repository(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Lifespan context manager that handles background simulation loop startup and shutdown.
+    Lifespan context manager that handles background simulation loop startup, production fail-fast check, and engine cleanup.
     """
+    sentinel_mode = os.getenv("SENTINEL_MODE", "development").lower()
+    db_url = os.getenv("DATABASE_URL")
+    if sentinel_mode == "production" and not db_url:
+        raise RuntimeError("PRODUCTION CONFIGURATION FAILURE: DATABASE_URL environment variable is required in production mode.")
+
     loop_task = asyncio.create_task(_baseline_loop())
     yield
     loop_task.cancel()
+    await close_async_engine()
 
 
 app = FastAPI(title="SENTINEL - Real-Time Fraud Response System", lifespan=lifespan)
 
+# Safe CORS configuration (Phase 12 Hardening)
+cors_env = os.getenv("CORS_ORIGINS")
+if cors_env:
+    allowed_origins = [origin.strip() for origin in cors_env.split(",") if origin.strip()]
+else:
+    allowed_origins = [
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:3000"
+    ]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -95,7 +113,7 @@ class ConnectionManager:
 
     async def broadcast(self, message: dict[str, Any]) -> None:
         failed: list[WebSocket] = []
-        for ws in self.active_connections:
+        for ws in list(self.active_connections):
             try:
                 await ws.send_json(message)
             except Exception:
@@ -106,6 +124,7 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 investigation_orchestrator.broadcast_manager = manager
+
 
 
 
@@ -260,8 +279,33 @@ class DispositionRequest(BaseModel):
 
 
 @app.get("/health")
-def health_check() -> dict[str, str]:
-    return {"status": "ok", "message": "Sentinel API is healthy"}
+async def health_check(
+    session: Optional[AsyncSession] = Depends(get_db_session)
+) -> dict[str, Any]:
+    db_url = os.getenv("DATABASE_URL")
+    sentinel_mode = os.getenv("SENTINEL_MODE", "development").lower()
+
+    db_status = "disabled"
+    if db_url or sentinel_mode == "production":
+        if session is not None:
+            try:
+                from sqlalchemy import text
+                await session.execute(text("SELECT 1"))
+                db_status = "connected"
+            except Exception as e:
+                db_status = f"error: {str(e)}"
+                raise HTTPException(status_code=503, detail={"status": "unhealthy", "database": db_status})
+        else:
+            db_status = "disconnected"
+            raise HTTPException(status_code=503, detail={"status": "unhealthy", "database": db_status})
+
+    return {
+        "status": "healthy",
+        "mode": sentinel_mode,
+        "database": db_status,
+        "timestamp": _now_iso()
+    }
+
 
 
 async def _run_background_investigation(case_id: str, store: dict):
@@ -273,6 +317,10 @@ async def _run_background_investigation(case_id: str, store: dict):
     if db_url or os.getenv("SENTINEL_MODE") == "production":
         try:
             async for session in get_db_session():
+                if session is None:
+                    repo = InMemoryCaseRepository(store)
+                    await investigation_orchestrator.run_investigation(case_id, repo=repo, store=store)
+                    break
                 repo = PostgreSQLCaseRepository(session)
                 try:
                     await investigation_orchestrator.run_investigation(case_id, repo=repo, store=store)
@@ -286,6 +334,7 @@ async def _run_background_investigation(case_id: str, store: dict):
     else:
         repo = InMemoryCaseRepository(store)
         await investigation_orchestrator.run_investigation(case_id, repo=repo, store=store)
+
 
 
 @app.post("/transaction")
