@@ -15,6 +15,7 @@ from app.services.mock_apis import mock_bank_freeze, mock_police_alert, mock_tel
 from app.services.orchestrator import run_pipeline
 from app.services.evidence_agent import collect_evidence, collect_evidence_for_case, collect_evidence_for_transaction
 from app.services.contextual_agent import investigate_context, investigate_case, investigate_transaction
+from app.services.regulatory_agent import assess_regulatory_risk, assess_case_regulatory_risk, assess_transaction_regulatory_risk
 
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -157,6 +158,7 @@ def _case_payload(case: dict[str, Any]) -> dict[str, Any]:
     transactions = [tx_store[tid] for tid in tx_ids if tid in tx_store]
     evidence_package = collect_evidence_for_case(case_id, data_store)
     contextual_investigation = investigate_context(evidence_package)
+    regulatory_assessment = assess_regulatory_risk(evidence_package, contextual_investigation)
 
     return {
         "case_id": case_id,
@@ -174,6 +176,7 @@ def _case_payload(case: dict[str, Any]) -> dict[str, Any]:
         "chain": case.get("chain", []),
         "evidence_package": evidence_package,
         "contextual_investigation": contextual_investigation,
+        "regulatory_assessment": regulatory_assessment,
     }
 
 
@@ -285,6 +288,33 @@ def get_investigation_post(payload: EvidenceRequest) -> dict[str, Any]:
     target = payload.target_id or payload.case_id or payload.tx_id or ""
     evidence_pkg = collect_evidence(target, data_store)
     return investigate_context(evidence_pkg)
+
+
+@app.get("/cases/{case_id}/regulatory-assessment")
+def get_case_regulatory_assessment(case_id: str) -> dict[str, Any]:
+    """
+    Returns Phase 3 Regulatory Risk Assessment Report for a given case.
+    """
+    return assess_case_regulatory_risk(case_id, data_store)
+
+
+@app.get("/transactions/{tx_id}/regulatory-assessment")
+def get_transaction_regulatory_assessment(tx_id: str) -> dict[str, Any]:
+    """
+    Returns Phase 3 Regulatory Risk Assessment Report for a given transaction.
+    """
+    return assess_transaction_regulatory_risk(tx_id, data_store)
+
+
+@app.post("/regulatory-assessment")
+def get_regulatory_assessment_post(payload: EvidenceRequest) -> dict[str, Any]:
+    """
+    Universal regulatory assessment endpoint supporting target_id, case_id, or tx_id.
+    """
+    target = payload.target_id or payload.case_id or payload.tx_id or ""
+    evidence_pkg = collect_evidence(target, data_store)
+    contextual_rpt = investigate_context(evidence_pkg)
+    return assess_regulatory_risk(evidence_pkg, contextual_rpt)
 
 
 @app.get("/export/sentinel_audit.csv")

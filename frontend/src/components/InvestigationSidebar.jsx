@@ -5,7 +5,7 @@ import FactorBreakdown from './FactorBreakdown';
 import ActionButton from './ActionButton';
 import { maskAccount } from '../utils/maskAccount';
 import { twMerge } from 'tailwind-merge';
-import { X, ShieldAlert, Cpu, ArrowRight, Clock, Activity, Lock, Eye, AlertTriangle, ShieldCheck, CheckCircle2 } from 'lucide-react';
+import { X, ShieldAlert, Cpu, ArrowRight, Clock, Activity, Lock, Eye, AlertTriangle, ShieldCheck, CheckCircle2, FileText } from 'lucide-react';
 
 const InvestigationSidebar = ({ 
   isOpen, 
@@ -19,6 +19,7 @@ const InvestigationSidebar = ({
   const isViewer = role !== 'admin';
   const [evidencePackage, setEvidencePackage] = React.useState(null);
   const [contextualReport, setContextualReport] = React.useState(null);
+  const [regulatoryReport, setRegulatoryReport] = React.useState(null);
 
   React.useEffect(() => {
     if (selectedCase?.evidence_package) {
@@ -55,6 +56,24 @@ const InvestigationSidebar = ({
         .catch(() => {});
     } else {
       setContextualReport(null);
+    }
+
+    if (selectedCase?.regulatory_assessment) {
+      setRegulatoryReport(selectedCase.regulatory_assessment);
+    } else if (selectedCase?.case_id) {
+      const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
+      fetch(`${API_BASE}/cases/${selectedCase.case_id}/regulatory-assessment`)
+        .then(res => res.ok ? res.json() : null)
+        .then(data => { if (data && data.found) setRegulatoryReport(data); })
+        .catch(() => {});
+    } else if (selectedTransaction?.tx_id) {
+      const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
+      fetch(`${API_BASE}/transactions/${selectedTransaction.tx_id}/regulatory-assessment`)
+        .then(res => res.ok ? res.json() : null)
+        .then(data => { if (data && data.found) setRegulatoryReport(data); })
+        .catch(() => {});
+    } else {
+      setRegulatoryReport(null);
     }
   }, [selectedCase, selectedTransaction]);
 
@@ -334,6 +353,71 @@ const InvestigationSidebar = ({
                       </div>
                     ))}
                   </div>
+                </section>
+              )}
+
+              {/* Regulatory Risk Assessment Agent (Phase 3) */}
+              {regulatoryReport && regulatoryReport.regulatory_indicators && regulatoryReport.regulatory_indicators.length > 0 && (
+                <section className="bg-slate-900/50 rounded-xl p-4 border border-purple-500/20 space-y-3">
+                  <div className="flex justify-between items-center pb-2 border-b border-border/60">
+                    <h3 className="text-[10px] font-semibold uppercase tracking-wider text-purple-400 flex items-center gap-1.5">
+                      <FileText className="w-3.5 h-3.5 text-purple-400" />
+                      Regulatory Risk Assessment
+                    </h3>
+                    <span
+                      title="Rule-based regulatory heuristic index; not a calibrated probability."
+                      className={twMerge(
+                        "text-[9px] font-mono font-bold px-2 py-0.5 rounded border uppercase cursor-help",
+                        regulatoryReport.summary?.regulatory_severity === 'CRITICAL' ? "bg-rose-500/20 text-rose-300 border-rose-500/40" :
+                        regulatoryReport.summary?.regulatory_severity === 'HIGH' ? "bg-amber-500/20 text-amber-300 border-amber-500/40" :
+                        "bg-purple-500/20 text-purple-300 border-purple-500/40"
+                      )}
+                    >
+                      {regulatoryReport.summary?.regulatory_severity || 'HIGH'} · HEURISTIC INDEX {((regulatoryReport.summary?.assessment_heuristic_index || 0)).toFixed(2)}
+                    </span>
+                  </div>
+
+                  {/* Regulatory Indicators */}
+                  <div className="space-y-2 max-h-56 overflow-y-auto pr-1 text-xs">
+                    {regulatoryReport.regulatory_indicators.map((reg) => (
+                      <div key={reg.id} className="p-2.5 rounded-lg bg-card/80 border border-border/60 space-y-1">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[9px] font-mono font-bold text-slate-400 uppercase">
+                            {reg.id} • {reg.indicator_code}
+                          </span>
+                          <div className="flex items-center gap-1">
+                            {reg.supporting_evidence_ids && reg.supporting_evidence_ids.map((evId) => (
+                              <span key={evId} className="text-[8px] font-mono px-1 py-0.2 rounded bg-slate-800 text-sky-400 border border-slate-700">
+                                {evId}
+                              </span>
+                            ))}
+                            {reg.supporting_context_ids && reg.supporting_context_ids.map((ctxId) => (
+                              <span key={ctxId} className="text-[8px] font-mono px-1 py-0.2 rounded bg-indigo-950 text-indigo-300 border border-indigo-800/60">
+                                {ctxId}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                        <p className="text-[11px] text-slate-200 leading-snug">
+                          {reg.indicator}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Compliance Considerations */}
+                  {regulatoryReport.compliance_considerations && regulatoryReport.compliance_considerations.length > 0 && (
+                    <div className="pt-2 border-t border-border/40 space-y-1.5">
+                      <span className="text-[9px] font-mono font-bold text-purple-400 uppercase tracking-wider block">
+                        Compliance Review Considerations
+                      </span>
+                      {regulatoryReport.compliance_considerations.map((c, idx) => (
+                        <div key={idx} className="text-[11px] text-slate-300 bg-purple-950/30 p-2 rounded border border-purple-900/40">
+                          • {c.recommendation}
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </section>
               )}
 
