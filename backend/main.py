@@ -13,7 +13,6 @@ from pydantic import BaseModel
 from app.core.data_store import data_store
 from app.services.mock_apis import mock_bank_freeze, mock_police_alert, mock_telecom_flag, mock_monitor_account, mock_close_case
 from app.services.orchestrator import run_pipeline
-from app.services.evidence_agent import collect_evidence, collect_evidence_for_case, collect_evidence_for_transaction
 
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -154,7 +153,6 @@ def _case_payload(case: dict[str, Any]) -> dict[str, Any]:
     tx_ids = case.get("transactions", [])
     tx_store = data_store.get("transactions", {})
     transactions = [tx_store[tid] for tid in tx_ids if tid in tx_store]
-    evidence_package = collect_evidence_for_case(case_id, data_store)
 
     return {
         "case_id": case_id,
@@ -170,14 +168,7 @@ def _case_payload(case: dict[str, Any]) -> dict[str, Any]:
         "golden_window_minutes": int(case.get("golden_window_minutes", 0)),
         "total_fraud_amount": float(case.get("total_fraud_amount", 0.0)),
         "chain": case.get("chain", []),
-        "evidence_package": evidence_package,
     }
-
-
-class EvidenceRequest(BaseModel):
-    target_id: str | None = None
-    case_id: str | None = None
-    tx_id: str | None = None
 
 
 class ActionRequest(BaseModel):
@@ -231,31 +222,6 @@ async def process_tx(request: Request) -> dict[str, Any]:
 @app.get("/cases")
 def get_cases() -> list[dict[str, Any]]:
     return [_case_payload(case) for case in data_store.get("cases", {}).values()]
-
-
-@app.get("/cases/{case_id}/evidence")
-def get_case_evidence(case_id: str) -> dict[str, Any]:
-    """
-    Returns structured, machine-readable evidence package for a given case.
-    """
-    return collect_evidence_for_case(case_id, data_store)
-
-
-@app.get("/transactions/{tx_id}/evidence")
-def get_transaction_evidence(tx_id: str) -> dict[str, Any]:
-    """
-    Returns structured, machine-readable evidence package for a given transaction.
-    """
-    return collect_evidence_for_transaction(tx_id, data_store)
-
-
-@app.post("/evidence")
-def get_evidence_post(payload: EvidenceRequest) -> dict[str, Any]:
-    """
-    Universal evidence collection endpoint supporting target_id, case_id, or tx_id.
-    """
-    target = payload.target_id or payload.case_id or payload.tx_id or ""
-    return collect_evidence(target, data_store)
 
 
 @app.get("/export/sentinel_audit.csv")
