@@ -151,6 +151,12 @@ class AbstractCaseRepository(ABC):
         pass
 
     @abstractmethod
+    async def get_investigation_runs_for_case(self, case_id: str) -> List[Dict[str, Any]]:
+        """Fetch all historical investigation runs for case_id ordered by started_at DESC."""
+        pass
+
+
+    @abstractmethod
     async def recover_stale_investigation_runs(self, stale_threshold_seconds: int = 600) -> int:
         """Finds active RUNNING investigations older than threshold and marks them FAILED/DEGRADED due to restart."""
         pass

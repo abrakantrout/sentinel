@@ -51,15 +51,25 @@ const InvestigationSidebar = ({
   }, [selectedCase?.case_id, fetchCaseHistory]);
 
 
+  const [showConfirmModal, setShowConfirmModal] = React.useState(false);
+  const [historicalRuns, setHistoricalRuns] = React.useState([]);
+  const [selectedRunId, setSelectedRunId] = React.useState(null);
+
   React.useEffect(() => {
     if (selectedCase?.case_id) {
       const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
+      fetch(`${API_BASE}/cases/${selectedCase.case_id}/investigation-runs`)
+        .then(res => res.ok ? res.json() : [])
+        .then(runs => setHistoricalRuns(runs || []))
+        .catch(() => setHistoricalRuns([]));
+
       fetch(`${API_BASE}/cases/${selectedCase.case_id}/investigation`)
         .then(res => res.ok ? res.json() : null)
         .then(data => {
           if (data) {
             setInvestigationReadModel(data);
             if (data.stages) {
+
               const ev = data.stages.find(s => s.stage === 'EVIDENCE')?.output;
               if (ev) setEvidencePackage(ev);
               const ctx = data.stages.find(s => s.stage === 'CONTEXTUAL')?.output;
@@ -764,35 +774,10 @@ const InvestigationSidebar = ({
                       <span className="text-[9px] font-mono font-bold text-indigo-400 uppercase tracking-wider block">
                         Analyst Disposition Terminal (Stateful Lifecycle Engine)
                       </span>
-                      <form onSubmit={async (e) => {
+                      <form onSubmit={(e) => {
                         e.preventDefault();
                         if (!selectedCase?.case_id || !selectedDispositionCode) return;
-                        setIsSubmittingDisposition(true);
-                        setDispositionResponse(null);
-                        const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
-                        try {
-                          const res = await fetch(`${API_BASE}/cases/${selectedCase.case_id}/disposition`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                              case_id: selectedCase.case_id,
-                              action_code: selectedDispositionCode,
-                              analyst_notes: analystNotes,
-                              analyst_id: "ANALYST-001",
-                              analyst_role: "COMPLIANCE_ANALYST",
-                              risk_acknowledged: riskAcknowledged
-                            })
-                          });
-                          const data = await res.json();
-                          setDispositionResponse(data);
-                          if (data.ok) {
-                            fetchCaseHistory(selectedCase.case_id);
-                          }
-                        } catch (err) {
-                          setDispositionResponse({ ok: false, error: 'Network error submitting disposition.' });
-                        } finally {
-                          setIsSubmittingDisposition(false);
-                        }
+                        setShowConfirmModal(true);
                       }} className="space-y-2">
                         <div>
                           <label className="text-[10px] text-slate-400 block mb-1">Select Disposition Option:</label>
@@ -843,11 +828,99 @@ const InvestigationSidebar = ({
                               disabled={isSubmittingDisposition || isViewer}
                               className="w-full py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs rounded transition-colors disabled:opacity-40"
                             >
-                              {isSubmittingDisposition ? 'Submitting...' : 'Submit Analyst Disposition Intent'}
+                              Review & Confirm Disposition
                             </button>
                           </>
                         )}
                       </form>
+
+                      {/* Disposition Confirmation Modal */}
+                      {showConfirmModal && (
+                        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                          <div className="bg-slate-900 border border-sky-500/30 rounded-xl p-5 max-w-md w-full space-y-4 shadow-2xl">
+                            <div className="flex justify-between items-center pb-2 border-b border-slate-800">
+                              <h3 className="text-xs font-bold uppercase tracking-wider text-sky-400 flex items-center gap-2">
+                                <ShieldAlert className="w-4 h-4 text-sky-400" />
+                                Confirm Analyst Disposition
+                              </h3>
+                              <button onClick={() => setShowConfirmModal(false)} className="text-slate-400 hover:text-white">
+                                <X className="w-4 h-4" />
+                              </button>
+                            </div>
+
+                            <div className="space-y-2 text-xs font-mono">
+                              <div className="flex justify-between p-2 rounded bg-slate-950 border border-slate-800">
+                                <span className="text-slate-400">Target Case ID:</span>
+                                <span className="text-slate-200 font-bold">{selectedCase?.case_id}</span>
+                              </div>
+                              <div className="flex justify-between p-2 rounded bg-slate-950 border border-slate-800">
+                                <span className="text-slate-400">Action Code:</span>
+                                <span className="text-sky-300 font-bold">{selectedDispositionCode}</span>
+                              </div>
+                              {analystNotes && (
+                                <div className="p-2 rounded bg-slate-950 border border-slate-800 space-y-1">
+                                  <span className="text-slate-400 text-[10px] block">Analyst Rationale:</span>
+                                  <p className="text-slate-200 text-[11px] leading-snug">{analystNotes}</p>
+                                </div>
+                              )}
+                            </div>
+
+                            <div className="p-3 rounded bg-amber-950/40 border border-amber-500/40 text-[10px] text-amber-200 space-y-1">
+                              <div className="flex items-center gap-1.5 font-bold uppercase">
+                                <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                                Human Authorization Boundary
+                              </div>
+                              <p className="text-slate-300 leading-tight">
+                                This disposition will transition case state and persist an immutable audit event to PostgreSQL. AI components cannot perform financial actions autonomously.
+                              </p>
+                            </div>
+
+                            <div className="flex gap-2 pt-2">
+                              <button
+                                onClick={() => setShowConfirmModal(false)}
+                                className="flex-1 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold rounded"
+                              >
+                                Cancel
+                              </button>
+                              <button
+                                onClick={async () => {
+                                  setShowConfirmModal(false);
+                                  setIsSubmittingDisposition(true);
+                                  setDispositionResponse(null);
+                                  const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
+                                  try {
+                                    const res = await fetch(`${API_BASE}/cases/${selectedCase.case_id}/disposition`, {
+                                      method: 'POST',
+                                      headers: { 'Content-Type': 'application/json' },
+                                      body: JSON.stringify({
+                                        case_id: selectedCase.case_id,
+                                        action_code: selectedDispositionCode,
+                                        analyst_notes: analystNotes,
+                                        analyst_id: "ANALYST-001",
+                                        analyst_role: "COMPLIANCE_ANALYST",
+                                        risk_acknowledged: riskAcknowledged
+                                      })
+                                    });
+                                    const data = await res.json();
+                                    setDispositionResponse(data);
+                                    if (data.ok) {
+                                      fetchCaseHistory(selectedCase.case_id);
+                                    }
+                                  } catch (err) {
+                                    setDispositionResponse({ ok: false, error: 'Network error submitting disposition.' });
+                                  } finally {
+                                    setIsSubmittingDisposition(false);
+                                  }
+                                }}
+                                className="flex-1 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded"
+                              >
+                                Confirm & Submit Disposition
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
 
                       {dispositionResponse && (
                         <div className={twMerge(

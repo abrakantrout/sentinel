@@ -607,6 +607,15 @@ class PostgreSQLCaseRepository(AbstractCaseRepository):
         obj = res.scalars().first()
         return _inv_run_to_dict(obj) if obj else None
 
+    async def get_investigation_runs_for_case(self, case_id: str) -> List[Dict[str, Any]]:
+        stmt = select(InvestigationRun).filter(
+            InvestigationRun.case_id == case_id
+        ).order_by(InvestigationRun.started_at.desc())
+        res = await self.session.execute(stmt)
+        objs = res.scalars().all()
+        return [_inv_run_to_dict(o) for o in objs]
+
+
     async def recover_stale_investigation_runs(self, stale_threshold_seconds: int = 600) -> int:
         now = datetime.now(timezone.utc)
         threshold_dt = datetime.fromtimestamp(now.timestamp() - stale_threshold_seconds, timezone.utc)

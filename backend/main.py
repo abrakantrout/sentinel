@@ -559,6 +559,33 @@ async def get_case_stage_report(
     return rpt
 
 
+@app.get("/cases/{case_id}/investigation-runs")
+async def get_case_investigation_runs(
+    case_id: str,
+    repo: AbstractCaseRepository = Depends(get_repository)
+) -> list[dict[str, Any]]:
+    """
+    Returns all historical durable InvestigationRun records for a given case_id.
+    """
+    return await repo.get_investigation_runs_for_case(case_id)
+
+
+@app.get("/cases/{case_id}/investigation-runs/{run_id}")
+async def get_specific_investigation_run(
+    case_id: str,
+    run_id: str,
+    repo: AbstractCaseRepository = Depends(get_repository)
+) -> dict[str, Any]:
+    """
+    Returns specific historical InvestigationRun record by run_id.
+    """
+    run = await repo.get_investigation_run(run_id)
+    if not run or run.get("case_id") != case_id:
+        raise HTTPException(status_code=404, detail=f"Investigation run '{run_id}' not found for case '{case_id}'")
+    return run
+
+
+
 @app.get("/transactions/{tx_id}/investigation")
 def get_transaction_investigation(tx_id: str) -> dict[str, Any]:
     """
