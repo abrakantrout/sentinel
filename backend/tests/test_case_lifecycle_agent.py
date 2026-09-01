@@ -862,6 +862,105 @@ class TestCaseLifecycleAPI(unittest.TestCase):
         self.assertEqual(data["status"], "INSUFFICIENT_DATA")
 
 
+import asyncio
+from app.repositories.in_memory import InMemoryCaseRepository
+from app.services.case_lifecycle_agent import CaseLifecycleService
+
+
+def _async_run(coro):
+    return asyncio.run(coro)
+
+
+class TestCaseLifecycleServiceDI(unittest.TestCase):
+
+    def setUp(self):
+        self.store = {
+            "transactions": {},
+            "cases": {},
+            "graphs": {},
+            "accounts": {},
+            "actions": [],
+            "dispositions": {},
+            "audit_log": []
+        }
+        self.repo = InMemoryCaseRepository(self.store)
+        self.service = CaseLifecycleService(self.repo)
+
+        self.tx = {
+            "tx_id": "TX-DI-01",
+            "timestamp": "2026-09-01T10:00:00Z",
+            "sender_account": "A1",
+            "receiver_account": "A2",
+            "amount": 100000.0,
+            "currency": "USD"
+        }
+        self.pipe = _run_full_pipeline(self.tx, self.store)
+        self.case_id = self.pipe["case_id"]
+
+    def test_di_1_service_accepts_injected_repository(self):
+        """Step 3 Test 1: CaseLifecycleService accepts injected repository."""
+        self.assertEqual(self.service.repository, self.repo)
+
+    def test_di_2_successful_disposition_through_repository(self):
+        """Step 3 Test 2: Disposition processed through repository-injected service."""
+        res = _async_run(self.service.submit_case_disposition(
+            case_id=self.case_id,
+            action_code="DISMISS_CASE",
+            analyst_notes="DI test dismissal.",
+            decision_support_report=self.pipe["ds"],
+            analyst_id="ANALYST-DI-1",
+            analyst_role="COMPLIANCE_ANALYST"
+        ))
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["status"], "SUCCESS")
+        self.assertEqual(res["new_case_status"], "RESOLVED_DISMISSED")
+
+    def test_di_3_failed_validation_zero_repository_mutation(self):
+        """Step 3 Test 3: Failed validation causes ZERO mutation in repository."""
+        res = _async_run(self.service.submit_case_disposition(
+            case_id=self.case_id,
+            action_code="FREEZE",
+            analyst_notes="Forbidden attempt.",
+            decision_support_report=self.pipe["ds"]
+        ))
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["status"], "INVALID_INPUT")
+        
+        hist = _async_run(self.repo.get_case_history(self.case_id))
+        self.assertEqual(len(hist["disposition_history"]), 0)
+
+    def test_di_4_idempotency_cached_response(self):
+        """Step 3 Test 4: Supplying existing idempotency_key returns cached response without duplicate audit."""
+        res1 = _async_run(self.service.submit_case_disposition(
+            case_id=self.case_id,
+            action_code="REQUEST_CUSTOMER_CDD",
+            analyst_notes="CDD step.",
+            decision_support_report=self.pipe["ds"],
+            idempotency_key="IDEM-KEY-DI-1"
+        ))
+        self.assertTrue(res1["ok"])
+
+        res2 = _async_run(self.service.submit_case_disposition(
+            case_id=self.case_id,
+            action_code="REQUEST_CUSTOMER_CDD",
+            analyst_notes="CDD step duplicate.",
+            decision_support_report=self.pipe["ds"],
+            idempotency_key="IDEM-KEY-DI-1"
+        ))
+        self.assertTrue(res2["ok"])
+        self.assertTrue(res2.get("idempotent_cached_response"))
+
+        hist = _async_run(self.repo.get_case_history(self.case_id))
+        self.assertEqual(len(hist["disposition_history"]), 1)
+
+    def test_di_5_static_architecture_check_no_direct_postgres_import(self):
+        """Step 3 Test 5: case_lifecycle_agent.py does not import PostgreSQLCaseRepository directly."""
+        import app.services.case_lifecycle_agent as agent_mod
+        mod_dict = dir(agent_mod)
+        self.assertNotIn("PostgreSQLCaseRepository", mod_dict)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 

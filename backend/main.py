@@ -7,10 +7,12 @@ import random
 import string
 
 import uvicorn
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, Depends
 from pydantic import BaseModel
 
 from app.core.data_store import data_store
+from app.repositories.base import AbstractCaseRepository
+from app.repositories.in_memory import InMemoryCaseRepository
 from app.services.mock_apis import mock_bank_freeze, mock_police_alert, mock_telecom_flag, mock_monitor_account, mock_close_case
 from app.services.orchestrator import run_pipeline
 from app.services.evidence_agent import collect_evidence, collect_evidence_for_case, collect_evidence_for_transaction
@@ -19,12 +21,21 @@ from app.services.regulatory_agent import assess_regulatory_risk, assess_case_re
 from app.services.audit_explanation_agent import generate_audit_explanation, generate_case_audit_explanation, generate_transaction_audit_explanation
 from app.services.analyst_agent import generate_analyst_decision_support, generate_case_analyst_decision_support, generate_transaction_analyst_decision_support
 from app.services.case_lifecycle_agent import (
+    CaseLifecycleService,
     submit_case_disposition as submit_case_disposition_service,
     get_case_disposition_history,
     get_case_audit_history,
 )
 
 from fastapi.middleware.cors import CORSMiddleware
+
+
+def get_repository() -> AbstractCaseRepository:
+    """
+    FastAPI Dependency Provider for AbstractCaseRepository.
+    Defaults to InMemoryCaseRepository(data_store) for backward compatibility.
+    """
+    return InMemoryCaseRepository(data_store)
 
 
 @asynccontextmanager
@@ -439,11 +450,13 @@ def get_decision_support_post(payload: EvidenceRequest) -> dict[str, Any]:
 
 
 @app.post("/cases/{case_id}/disposition")
-def submit_case_disposition(case_id: str, payload: DispositionRequest) -> dict[str, Any]:
+def submit_case_disposition(
+    case_id: str,
+    payload: DispositionRequest,
+    repo: AbstractCaseRepository = Depends(get_repository)
+) -> dict[str, Any]:
     """
-    Stateful Case Lifecycle Disposition Endpoint (Phase 6).
-    Validates analyst intent against Phase 5 offered options, executes state transition on case object,
-    persists disposition record in data_store['dispositions'], and appends immutable audit event to data_store['audit_log'].
+    Stateful Case Lifecycle Disposition Endpoint (Phase 7 Repository Adapter).
     """
     case = data_store.get("cases", {}).get(case_id)
     if not case:
@@ -467,14 +480,14 @@ def submit_case_disposition(case_id: str, payload: DispositionRequest) -> dict[s
         return {
             "ok": False,
             "status": "INVALID_INPUT",
-            "error": f"Forbidden action code '{payload.action_code}'. Phase 6 does not execute autonomous enforcement actions.",
+            "error": f"Forbidden action code '{payload.action_code}'. Phase 7 does not execute autonomous enforcement actions.",
             "acknowledged": False
         }
 
     # Resolve Phase 5 decision support report
     ds_report = generate_case_analyst_decision_support(case_id, data_store)
 
-    # Invoke Phase 6 stateful disposition service
+    # Invoke repository-backed stateful disposition service
     res = submit_case_disposition_service(
         case_id=case_id,
         action_code=payload.action_code,
@@ -483,15 +496,18 @@ def submit_case_disposition(case_id: str, payload: DispositionRequest) -> dict[s
         analyst_id=payload.analyst_id or "ANALYST-001",
         analyst_role=payload.analyst_role or "COMPLIANCE_ANALYST",
         risk_acknowledged=payload.risk_acknowledged,
-        store=data_store
+        repository=repo
     )
     return res
 
 
 @app.get("/cases/{case_id}/history")
-def get_case_history_endpoint(case_id: str) -> dict[str, Any]:
+def get_case_history_endpoint(
+    case_id: str,
+    repo: AbstractCaseRepository = Depends(get_repository)
+) -> dict[str, Any]:
     """
-    Returns complete chronological lifecycle and disposition audit history for a given case.
+    Returns complete chronological lifecycle and disposition audit history for a given case via repository.
     """
     case = data_store.get("cases", {}).get(case_id)
     if not case:
@@ -504,8 +520,8 @@ def get_case_history_endpoint(case_id: str) -> dict[str, Any]:
             "audit_history": []
         }
 
-    dispositions = get_case_disposition_history(case_id, store=data_store)
-    audit_log = get_case_audit_history(case_id, store=data_store)
+    dispositions = get_case_disposition_history(case_id, repository=repo)
+    audit_log = get_case_audit_history(case_id, repository=repo)
 
     return {
         "found": True,

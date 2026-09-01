@@ -1,0 +1,65 @@
+"""
+Abstract Case Repository Interface for SENTINEL (Phase 7).
+"""
+
+from abc import ABC, abstractmethod
+from typing import Dict, Any, List, Optional
+
+
+class AbstractCaseRepository(ABC):
+    """
+    Abstract contract for case lifecycle, disposition, and audit persistence operations.
+    Exposes no update/delete methods for audit log entries (append-only audit boundary).
+    """
+
+    @abstractmethod
+    async def get_case_by_id(self, case_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch case record by case_id without pessimistic locking."""
+        pass
+
+    @abstractmethod
+    async def get_case_for_update(self, case_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch case record by case_id with a pessimistic row lock (SELECT FOR UPDATE)."""
+        pass
+
+    @abstractmethod
+    async def get_disposition_by_idempotency_key(self, idempotency_key: str) -> Optional[Dict[str, Any]]:
+        """Lookup existing disposition record by idempotency key."""
+        pass
+
+    @abstractmethod
+    async def save_disposition_and_audit(
+        self,
+        case_id: str,
+        new_status: str,
+        disposition_record: Dict[str, Any],
+        audit_event_record: Dict[str, Any]
+    ) -> bool:
+        """
+        Atomically executes:
+        1. Insertion of disposition record.
+        2. Case status update and timestamp modification.
+        3. Insertion of immutable audit event record.
+        """
+        pass
+
+    @abstractmethod
+    async def get_case_history(self, case_id: str) -> Dict[str, Any]:
+        """
+        Retrieves complete chronological disposition and audit log history for a given case.
+        Returns dict containing:
+        - current_case_status
+        - disposition_history
+        - audit_history
+        """
+        pass
+
+    @abstractmethod
+    async def save_case(self, case_record: Dict[str, Any]) -> bool:
+        """Saves or initializes a case entity."""
+        pass
+
+    @abstractmethod
+    async def save_investigation_report(self, report_record: Dict[str, Any]) -> bool:
+        """Saves an investigation report artifact associated with a case."""
+        pass
