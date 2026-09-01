@@ -264,6 +264,30 @@ def health_check() -> dict[str, str]:
     return {"status": "ok", "message": "Sentinel API is healthy"}
 
 
+async def _run_background_investigation(case_id: str, store: dict):
+    """
+    Executes the automated investigation in a dedicated, isolated database session
+    without holding or sharing the HTTP request's session.
+    """
+    db_url = os.getenv("DATABASE_URL")
+    if db_url or os.getenv("SENTINEL_MODE") == "production":
+        try:
+            async for session in get_db_session():
+                repo = PostgreSQLCaseRepository(session)
+                try:
+                    await investigation_orchestrator.run_investigation(case_id, repo=repo, store=store)
+                    await session.commit()
+                except Exception as e:
+                    await session.rollback()
+                    print(f"[Background Investigation Error] {e}")
+                break
+        except Exception as e:
+            print(f"[Background Session Error] {e}")
+    else:
+        repo = InMemoryCaseRepository(store)
+        await investigation_orchestrator.run_investigation(case_id, repo=repo, store=store)
+
+
 @app.post("/transaction")
 async def process_tx(
     request: Request,
@@ -278,7 +302,6 @@ async def process_tx(
         raise HTTPException(status_code=400, detail="Invalid transaction payload structure")
 
     result = run_pipeline(tx, data_store)
-
 
     transaction = result.get("transaction") or {}
     case = result.get("case")
@@ -318,18 +341,31 @@ async def process_tx(
         "rule_score": transaction.get("rule_score", 0),
         "ml_feature_importance": transaction.get("ml_feature_importance", {})
     }
+    await manager.broadcast(tx_event)
 
     if case:
         case_id = case.get("case_id")
         if case_id:
-            await investigation_orchestrator.run_investigation(case_id, repo=repo, store=data_store)
+            sync_env = os.getenv("SENTINEL_SYNC_INVESTIGATION")
+            if sync_env is not None:
+                is_sync = (sync_env == "1")
+            else:
+                is_sync = not (os.getenv("SENTINEL_MODE") == "production" or os.getenv("DATABASE_URL"))
+
+            if is_sync:
+                await investigation_orchestrator.run_investigation(case_id, repo=repo, store=data_store)
+            else:
+                asyncio.create_task(_run_background_investigation(case_id, data_store))
         case_event = {"event": "case_updated", **_case_payload(case)}
         await manager.broadcast(case_event)
+
 
     if isinstance(repo, PostgreSQLCaseRepository):
         await repo.session.commit()
 
     return result
+
+
 
 
 
@@ -401,12 +437,126 @@ def get_evidence_post(payload: EvidenceRequest) -> dict[str, Any]:
     return collect_evidence(target, data_store)
 
 
+async def _build_investigation_read_model(case_id: str, repo: AbstractCaseRepository) -> dict[str, Any]:
+    run = await repo.get_active_investigation_run(case_id) or await repo.get_latest_investigation_run(case_id)
+
+    stage_types = ["EVIDENCE", "CONTEXTUAL", "REGULATORY", "AUDIT_EXPLANATION", "DECISION_SUPPORT"]
+
+    stages_output = []
+    completed_count = 0
+    failed_count = 0
+    skipped_count = 0
+    degraded_reasons = []
+
+    stage_states = run.get("stages", {}) if run else {}
+
+    for stg in stage_types:
+        stg_info = stage_states.get(stg, {})
+        stg_status = stg_info.get("status", "PENDING")
+        stg_start = stg_info.get("started_at")
+        stg_comp = stg_info.get("completed_at")
+        stg_err = stg_info.get("error")
+
+        duration_ms = None
+        if stg_start and stg_comp:
+            try:
+                dt_s = datetime.fromisoformat(stg_start.replace("Z", "+00:00"))
+                dt_c = datetime.fromisoformat(stg_comp.replace("Z", "+00:00"))
+                duration_ms = int((dt_c - dt_s).total_seconds() * 1000)
+            except Exception:
+                pass
+
+        rpt = None
+        rpt_id = None
+        if stg_status == "COMPLETED":
+            completed_count += 1
+            rpt_obj = await repo.get_investigation_report(case_id, stg)
+            if rpt_obj:
+                rpt_id = rpt_obj.get("report_id")
+                rpt = rpt_obj.get("report_data")
+        elif stg_status == "FAILED":
+            failed_count += 1
+            if stg_err:
+                degraded_reasons.append(f"{stg}_STAGE_FAILED: {stg_err}")
+        elif stg_status == "SKIPPED":
+            skipped_count += 1
+
+        stages_output.append({
+            "stage": stg,
+            "status": stg_status,
+            "started_at": stg_start,
+            "completed_at": stg_comp,
+            "duration_ms": duration_ms,
+            "report_id": rpt_id,
+            "output": rpt,
+            "error": stg_err
+        })
+
+    ds_rpt_obj = await repo.get_investigation_report(case_id, "DECISION_SUPPORT")
+    ds_output = ds_rpt_obj.get("report_data") if ds_rpt_obj else None
+
+    run_status = run.get("status", "NONE") if run else "NONE"
+    is_degraded = (run_status == "DEGRADED") or (failed_count > 0)
+
+    sum_dict = run.get("summary", {}) if run else {}
+    degraded_reasons = sum_dict.get("degraded_reasons") or degraded_reasons
+
+    return {
+        "case_id": case_id,
+        "run_id": run.get("run_id") if run else None,
+        "status": run_status,
+        "started_at": run.get("started_at") if run else None,
+        "completed_at": run.get("completed_at") if run else None,
+        "current_stage": run.get("current_stage", "NONE") if run else "NONE",
+        "stages": stages_output,
+        "summary": {
+            "completed_stages": completed_count,
+            "failed_stages": failed_count,
+            "skipped_stages": skipped_count,
+            "degraded": is_degraded,
+            "degraded_reasons": degraded_reasons,
+            "review_priority": sum_dict.get("review_priority", "UNKNOWN"),
+            "regulatory_severity": sum_dict.get("regulatory_severity", "UNKNOWN"),
+            "recommended_action": sum_dict.get("recommended_action", "NO_RECOMMENDATION")
+        },
+        "decision_support": ds_output,
+        "human_approval_boundary": {
+            "autonomous_execution": False,
+            "required_role": "COMPLIANCE_ANALYST"
+        }
+    }
+
+
 @app.get("/cases/{case_id}/investigation")
-def get_case_investigation(case_id: str) -> dict[str, Any]:
+async def get_case_investigation(
+    case_id: str,
+    repo: AbstractCaseRepository = Depends(get_repository)
+) -> dict[str, Any]:
     """
-    Returns Phase 2 Contextual Investigation Report for a given case.
+    Returns Phase 10 read-oriented comprehensive investigation representation for a given case.
     """
-    return investigate_case(case_id, data_store)
+    return await _build_investigation_read_model(case_id, repo)
+
+
+@app.get("/cases/{case_id}/reports/{report_type}")
+async def get_case_stage_report(
+    case_id: str,
+    report_type: str,
+    repo: AbstractCaseRepository = Depends(get_repository)
+) -> dict[str, Any]:
+    """
+    Retrieves historical, immutable persisted investigation report for a given stage.
+    """
+    valid_types = {"EVIDENCE", "CONTEXTUAL", "REGULATORY", "AUDIT_EXPLANATION", "DECISION_SUPPORT"}
+    clean_type = report_type.upper()
+    if clean_type not in valid_types:
+        raise HTTPException(status_code=400, detail=f"Invalid report_type '{report_type}'. Must be one of {valid_types}")
+
+    rpt = await repo.get_investigation_report(case_id, clean_type)
+    if not rpt or not rpt.get("report_data"):
+        raise HTTPException(status_code=404, detail=f"Report '{clean_type}' not found or stage failed for case '{case_id}'")
+
+    return rpt
 
 
 @app.get("/transactions/{tx_id}/investigation")
@@ -415,6 +565,7 @@ def get_transaction_investigation(tx_id: str) -> dict[str, Any]:
     Returns Phase 2 Contextual Investigation Report for a given transaction.
     """
     return investigate_transaction(tx_id, data_store)
+
 
 
 @app.post("/investigation")

@@ -73,7 +73,13 @@ class Case(Base):
         back_populates="case",
         cascade="all, delete-orphan"
     )
+    investigation_runs: Mapped[list["InvestigationRun"]] = relationship(
+        "InvestigationRun",
+        back_populates="case",
+        cascade="all, delete-orphan"
+    )
     dispositions: Mapped[list["Disposition"]] = relationship(
+
         "Disposition",
         back_populates="case"
     )

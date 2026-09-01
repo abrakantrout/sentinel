@@ -25,6 +25,7 @@ class InMemoryCaseRepository(AbstractCaseRepository):
         self._accounts: Dict[str, Dict[str, Any]] = {}
         self._transactions: Dict[str, Dict[str, Any]] = {}
         self._reports: Dict[str, Dict[str, Any]] = {}
+        self._inv_runs: Dict[str, Dict[str, Any]] = {}
 
         if store is not None:
             self._cases = store.setdefault("cases", {})
@@ -33,6 +34,8 @@ class InMemoryCaseRepository(AbstractCaseRepository):
             self._accounts = store.setdefault("accounts", {})
             self._transactions = store.setdefault("transactions", {})
             self._reports = store.setdefault("investigation_reports", {})
+            self._inv_runs = store.setdefault("investigation_runs", {})
+
 
 
     async def get_case_by_id(self, case_id: str) -> Optional[Dict[str, Any]]:
@@ -196,3 +199,45 @@ class InMemoryCaseRepository(AbstractCaseRepository):
 
     async def get_all_audit_events(self) -> List[Dict[str, Any]]:
         return [copy.deepcopy(a) for a in self._audit_log]
+
+    async def save_investigation_run(self, run_record: Dict[str, Any]) -> bool:
+        run_id = run_record["run_id"]
+        self._inv_runs[run_id] = copy.deepcopy(run_record)
+        return True
+
+    async def get_investigation_run(self, run_id: str) -> Optional[Dict[str, Any]]:
+        r = self._inv_runs.get(run_id)
+        return copy.deepcopy(r) if r else None
+
+    async def get_active_investigation_run(self, case_id: str) -> Optional[Dict[str, Any]]:
+        for r in self._inv_runs.values():
+            if r.get("case_id") == case_id and r.get("status") == "RUNNING":
+                return copy.deepcopy(r)
+        return None
+
+    async def get_latest_investigation_run(self, case_id: str) -> Optional[Dict[str, Any]]:
+        runs = [copy.deepcopy(r) for r in self._inv_runs.values() if r.get("case_id") == case_id]
+        if not runs:
+            return None
+        runs.sort(key=lambda x: str(x.get("started_at", "")), reverse=True)
+        return runs[0]
+
+    async def recover_stale_investigation_runs(self, stale_threshold_seconds: int = 600) -> int:
+        recovered = 0
+        now = datetime.now(timezone.utc)
+        for r in self._inv_runs.values():
+            if r.get("status") == "RUNNING":
+                r["status"] = "FAILED"
+                r.setdefault("summary", {}).setdefault("degraded_reasons", []).append("STALE_RUN_PROCESS_RESTART_RECOVERY")
+                r["completed_at"] = now.isoformat().replace("+00:00", "Z")
+                recovered += 1
+        return recovered
+
+    async def get_case_for_update(self, case_id: str) -> Optional[Dict[str, Any]]:
+        return await self.get_case_by_id(case_id)
+
+    async def commit_transaction(self) -> None:
+        pass
+
+    async def rollback_transaction(self) -> None:
+        pass

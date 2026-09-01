@@ -14,7 +14,28 @@ from app.models.case import Case
 from app.models.disposition import Disposition
 from app.models.audit_event import AuditEvent
 from app.models.investigation_report import InvestigationReport
+from app.models.investigation_run import InvestigationRun
 from app.repositories.base import AbstractCaseRepository
+
+
+def _inv_run_to_dict(r: InvestigationRun) -> Dict[str, Any]:
+    return {
+        "run_id": r.run_id,
+        "investigation_id": r.run_id,
+        "case_id": r.case_id,
+        "status": r.status,
+        "current_stage": r.current_stage,
+        "stages": r.stage_states or {},
+        "stage_states": r.stage_states or {},
+        "summary": r.summary or {},
+        "retry_count": r.retry_count,
+        "force_rerun": r.force_rerun,
+        "started_at": r.started_at.isoformat().replace("+00:00", "Z") if r.started_at else None,
+        "completed_at": r.completed_at.isoformat().replace("+00:00", "Z") if r.completed_at else None,
+        "created_at": r.created_at.isoformat().replace("+00:00", "Z") if r.created_at else None,
+        "updated_at": r.updated_at.isoformat().replace("+00:00", "Z") if r.updated_at else None,
+    }
+
 
 
 def _account_to_dict(a: Account) -> Dict[str, Any]:
@@ -510,3 +531,118 @@ class PostgreSQLCaseRepository(AbstractCaseRepository):
         res = await self.session.execute(stmt)
         events = res.scalars().all()
         return [_audit_to_dict(e) for e in events]
+
+    async def save_investigation_run(self, run_record: Dict[str, Any]) -> bool:
+        run_id = run_record["run_id"]
+        case_id = run_record["case_id"]
+        status = run_record.get("status", "RUNNING")
+        current_stage = run_record.get("current_stage", "NONE")
+        stage_states = run_record.get("stages") or run_record.get("stage_states") or {}
+        summary = run_record.get("summary") or {}
+        retry_count = int(run_record.get("retry_count", 0))
+        force_rerun = bool(run_record.get("force_rerun", False))
+        started_dt = _parse_iso(run_record.get("started_at")) or datetime.now(timezone.utc)
+        completed_dt = _parse_iso(run_record.get("completed_at"))
+        created_dt = _parse_iso(run_record.get("created_at")) or started_dt
+        updated_dt = datetime.now(timezone.utc)
+
+        stmt = select(InvestigationRun).filter(InvestigationRun.run_id == run_id)
+        res = await self.session.execute(stmt)
+        obj = res.scalar_one_or_none()
+
+        if obj:
+            obj.status = status
+            obj.current_stage = current_stage
+            obj.stage_states = stage_states
+            obj.summary = summary
+            obj.retry_count = retry_count
+            obj.force_rerun = force_rerun
+            obj.completed_at = completed_dt
+            obj.updated_at = updated_dt
+        else:
+            obj = InvestigationRun(
+                run_id=run_id,
+                case_id=case_id,
+                status=status,
+                current_stage=current_stage,
+                stage_states=stage_states,
+                summary=summary,
+                retry_count=retry_count,
+                force_rerun=force_rerun,
+                started_at=started_dt,
+                completed_at=completed_dt,
+                created_at=created_dt,
+                updated_at=updated_dt
+            )
+            self.session.add(obj)
+
+        try:
+            await self.session.flush()
+        except IntegrityError:
+            await self.session.rollback()
+            return False
+        return True
+
+
+    async def get_investigation_run(self, run_id: str) -> Optional[Dict[str, Any]]:
+        stmt = select(InvestigationRun).filter(InvestigationRun.run_id == run_id)
+        res = await self.session.execute(stmt)
+        obj = res.scalar_one_or_none()
+        return _inv_run_to_dict(obj) if obj else None
+
+    async def get_active_investigation_run(self, case_id: str) -> Optional[Dict[str, Any]]:
+        stmt = select(InvestigationRun).filter(
+            InvestigationRun.case_id == case_id,
+            InvestigationRun.status == "RUNNING"
+        ).order_by(InvestigationRun.started_at.desc()).with_for_update(of=InvestigationRun)
+        res = await self.session.execute(stmt)
+        obj = res.scalars().first()
+        return _inv_run_to_dict(obj) if obj else None
+
+    async def get_latest_investigation_run(self, case_id: str) -> Optional[Dict[str, Any]]:
+        stmt = select(InvestigationRun).filter(
+            InvestigationRun.case_id == case_id
+        ).order_by(InvestigationRun.started_at.desc())
+        res = await self.session.execute(stmt)
+        obj = res.scalars().first()
+        return _inv_run_to_dict(obj) if obj else None
+
+    async def recover_stale_investigation_runs(self, stale_threshold_seconds: int = 600) -> int:
+        now = datetime.now(timezone.utc)
+        threshold_dt = datetime.fromtimestamp(now.timestamp() - stale_threshold_seconds, timezone.utc)
+
+        stmt = select(InvestigationRun).filter(
+            InvestigationRun.status == "RUNNING",
+            InvestigationRun.updated_at < threshold_dt
+        ).with_for_update()
+        res = await self.session.execute(stmt)
+        stale_runs = res.scalars().all()
+
+        recovered_count = 0
+        for r in stale_runs:
+            r.status = "FAILED"
+            r.completed_at = now
+            sum_dict = dict(r.summary or {})
+            reasons = list(sum_dict.get("degraded_reasons", []))
+            reasons.append("STALE_RUN_PROCESS_RESTART_RECOVERY")
+            sum_dict["degraded_reasons"] = reasons
+            r.summary = sum_dict
+            r.updated_at = now
+            recovered_count += 1
+
+        if recovered_count > 0:
+            await self.session.flush()
+
+        return recovered_count
+
+    async def get_case_for_update(self, case_id: str) -> Optional[Dict[str, Any]]:
+        stmt = select(Case).filter(Case.case_id == case_id).with_for_update(of=Case)
+        res = await self.session.execute(stmt)
+        c = res.scalar_one_or_none()
+        return _case_to_dict(c) if c else None
+
+    async def commit_transaction(self) -> None:
+        await self.session.commit()
+
+    async def rollback_transaction(self) -> None:
+        await self.session.rollback()

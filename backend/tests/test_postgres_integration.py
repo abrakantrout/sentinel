@@ -87,7 +87,9 @@ class TestPostgreSQLRealIntegration(unittest.TestCase):
             async with self.get_session() as session:
                 res = await session.execute(text("SELECT version_num FROM alembic_version"))
                 rev = res.scalar_one_or_none()
-                self.assertEqual(rev, "002_audit_immutability")
+                self.assertEqual(rev, "004_active_inv_unique_idx")
+
+
 
         self.run_async(verify_head())
 

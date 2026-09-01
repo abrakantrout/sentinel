@@ -129,3 +129,43 @@ class AbstractCaseRepository(ABC):
     async def get_all_audit_events(self) -> List[Dict[str, Any]]:
         """Fetch all audit events/actions for CSV export."""
         pass
+
+    @abstractmethod
+    async def save_investigation_run(self, run_record: Dict[str, Any]) -> bool:
+        """Saves or updates a durable InvestigationRun record."""
+        pass
+
+    @abstractmethod
+    async def get_investigation_run(self, run_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch investigation run by run_id."""
+        pass
+
+    @abstractmethod
+    async def get_active_investigation_run(self, case_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch active (RUNNING) investigation run for case_id."""
+        pass
+
+    @abstractmethod
+    async def get_latest_investigation_run(self, case_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch most recent investigation run for case_id."""
+        pass
+
+    @abstractmethod
+    async def recover_stale_investigation_runs(self, stale_threshold_seconds: int = 600) -> int:
+        """Finds active RUNNING investigations older than threshold and marks them FAILED/DEGRADED due to restart."""
+        pass
+
+    @abstractmethod
+    async def get_case_for_update(self, case_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch case with SELECT FOR UPDATE row lock to serialize concurrent operations across processes."""
+        pass
+
+    @abstractmethod
+    async def commit_transaction(self) -> None:
+        """Commits current database transaction boundary."""
+        pass
+
+    @abstractmethod
+    async def rollback_transaction(self) -> None:
+        """Rolls back current database transaction boundary."""
+        pass

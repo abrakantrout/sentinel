@@ -28,6 +28,7 @@ const InvestigationSidebar = ({
   const [dispositionResponse, setDispositionResponse] = React.useState(null);
   const [isSubmittingDisposition, setIsSubmittingDisposition] = React.useState(false);
   const [caseHistory, setCaseHistory] = React.useState(null);
+  const [investigationReadModel, setInvestigationReadModel] = React.useState(null);
 
   const fetchCaseHistory = React.useCallback((caseId) => {
     if (!caseId) {
@@ -49,7 +50,34 @@ const InvestigationSidebar = ({
     }
   }, [selectedCase?.case_id, fetchCaseHistory]);
 
+
   React.useEffect(() => {
+    if (selectedCase?.case_id) {
+      const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
+      fetch(`${API_BASE}/cases/${selectedCase.case_id}/investigation`)
+        .then(res => res.ok ? res.json() : null)
+        .then(data => {
+          if (data) {
+            setInvestigationReadModel(data);
+            if (data.stages) {
+              const ev = data.stages.find(s => s.stage === 'EVIDENCE')?.output;
+              if (ev) setEvidencePackage(ev);
+              const ctx = data.stages.find(s => s.stage === 'CONTEXTUAL')?.output;
+              if (ctx) setContextualReport(ctx);
+              const reg = data.stages.find(s => s.stage === 'REGULATORY')?.output;
+              if (reg) setRegulatoryReport(reg);
+              const aud = data.stages.find(s => s.stage === 'AUDIT_EXPLANATION')?.output;
+              if (aud) setAuditExplanation(aud);
+              const ds = data.stages.find(s => s.stage === 'DECISION_SUPPORT')?.output;
+              if (ds) setDecisionSupport(ds);
+            }
+          }
+        })
+        .catch(() => {});
+    } else {
+      setInvestigationReadModel(null);
+    }
+
     if (selectedCase?.evidence_package) {
       setEvidencePackage(selectedCase.evidence_package);
     } else if (selectedCase?.case_id) {
@@ -64,82 +92,49 @@ const InvestigationSidebar = ({
         .then(res => res.ok ? res.json() : null)
         .then(data => { if (data && data.found) setEvidencePackage(data); })
         .catch(() => {});
-    } else {
-      setEvidencePackage(null);
     }
 
     if (selectedCase?.contextual_investigation) {
       setContextualReport(selectedCase.contextual_investigation);
-    } else if (selectedCase?.case_id) {
-      const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
-      fetch(`${API_BASE}/cases/${selectedCase.case_id}/investigation`)
-        .then(res => res.ok ? res.json() : null)
-        .then(data => { if (data && data.found) setContextualReport(data); })
-        .catch(() => {});
     } else if (selectedTransaction?.tx_id) {
       const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
       fetch(`${API_BASE}/transactions/${selectedTransaction.tx_id}/investigation`)
         .then(res => res.ok ? res.json() : null)
         .then(data => { if (data && data.found) setContextualReport(data); })
         .catch(() => {});
-    } else {
-      setContextualReport(null);
     }
 
     if (selectedCase?.regulatory_assessment) {
       setRegulatoryReport(selectedCase.regulatory_assessment);
-    } else if (selectedCase?.case_id) {
-      const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
-      fetch(`${API_BASE}/cases/${selectedCase.case_id}/regulatory-assessment`)
-        .then(res => res.ok ? res.json() : null)
-        .then(data => { if (data && data.found) setRegulatoryReport(data); })
-        .catch(() => {});
     } else if (selectedTransaction?.tx_id) {
       const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
       fetch(`${API_BASE}/transactions/${selectedTransaction.tx_id}/regulatory-assessment`)
         .then(res => res.ok ? res.json() : null)
         .then(data => { if (data && data.found) setRegulatoryReport(data); })
         .catch(() => {});
-    } else {
-      setRegulatoryReport(null);
     }
 
     if (selectedCase?.audit_explanation) {
       setAuditExplanation(selectedCase.audit_explanation);
-    } else if (selectedCase?.case_id) {
-      const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
-      fetch(`${API_BASE}/cases/${selectedCase.case_id}/audit-explanation`)
-        .then(res => res.ok ? res.json() : null)
-        .then(data => { if (data && data.found) setAuditExplanation(data); })
-        .catch(() => {});
     } else if (selectedTransaction?.tx_id) {
       const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
       fetch(`${API_BASE}/transactions/${selectedTransaction.tx_id}/audit-explanation`)
         .then(res => res.ok ? res.json() : null)
         .then(data => { if (data && data.found) setAuditExplanation(data); })
         .catch(() => {});
-    } else {
-      setAuditExplanation(null);
     }
 
     if (selectedCase?.analyst_decision_support) {
       setDecisionSupport(selectedCase.analyst_decision_support);
-    } else if (selectedCase?.case_id) {
-      const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
-      fetch(`${API_BASE}/cases/${selectedCase.case_id}/decision-support`)
-        .then(res => res.ok ? res.json() : null)
-        .then(data => { if (data && data.found) setDecisionSupport(data); })
-        .catch(() => {});
     } else if (selectedTransaction?.tx_id) {
       const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
       fetch(`${API_BASE}/transactions/${selectedTransaction.tx_id}/decision-support`)
         .then(res => res.ok ? res.json() : null)
         .then(data => { if (data && data.found) setDecisionSupport(data); })
         .catch(() => {});
-    } else {
-      setDecisionSupport(null);
     }
   }, [selectedCase, selectedTransaction]);
+
 
   const totalFraud = selectedCase?.total_fraud_amount || 0;
   const recoverable = selectedCase?.recoverable_amount || 0;
@@ -322,9 +317,71 @@ const InvestigationSidebar = ({
                 </section>
               )}
 
+              {/* Phase 10 Analyst Investigation Timeline & Read Model */}
+              {investigationReadModel && (
+                <section className="bg-slate-950/80 rounded-xl p-4 border border-sky-500/30 space-y-3.5">
+                  <div className="flex justify-between items-center pb-2 border-b border-slate-800">
+                    <h3 className="text-[11px] font-bold uppercase tracking-wider text-sky-400 flex items-center gap-1.5">
+                      <Activity className="w-4 h-4 text-sky-400" />
+                      Automated Pipeline Lifecycle
+                    </h3>
+                    <span className={twMerge(
+                      "text-[9px] font-mono font-bold px-2 py-0.5 rounded border uppercase",
+                      investigationReadModel.status === 'COMPLETED' ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30" :
+                      investigationReadModel.status === 'RUNNING' ? "bg-sky-500/15 text-sky-400 border-sky-500/30 animate-pulse" :
+                      investigationReadModel.status === 'DEGRADED' ? "bg-amber-500/15 text-amber-400 border-amber-500/30" :
+                      investigationReadModel.status === 'FAILED' ? "bg-rose-500/15 text-rose-400 border-rose-500/30" :
+                      "bg-slate-800 text-slate-400 border-slate-700"
+                    )}>
+                      {investigationReadModel.status}
+                    </span>
+                  </div>
+
+                  {/* 5-Stage Timeline Stepper */}
+                  <div className="space-y-1.5">
+                    {investigationReadModel.stages && investigationReadModel.stages.map((stgItem, idx) => (
+                      <div key={stgItem.stage} className="flex items-center justify-between p-2 rounded bg-slate-900/60 border border-slate-800/80 text-[11px]">
+                        <div className="flex items-center gap-2 font-mono">
+                          <span className="text-slate-500 font-bold">{idx + 1}.</span>
+                          <span className="text-slate-200 font-semibold">{stgItem.stage}</span>
+                        </div>
+                        <div className="flex items-center gap-2 font-mono text-[10px]">
+                          {stgItem.duration_ms !== null && stgItem.duration_ms !== undefined && (
+                            <span className="text-slate-400">{stgItem.duration_ms}ms</span>
+                          )}
+                          <span className={twMerge(
+                            "px-1.5 py-0.5 rounded border font-semibold uppercase",
+                            stgItem.status === 'COMPLETED' ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20" :
+                            stgItem.status === 'RUNNING' ? "bg-sky-500/10 text-sky-400 border-sky-500/20 animate-pulse" :
+                            stgItem.status === 'FAILED' ? "bg-rose-500/10 text-rose-400 border-rose-500/20" :
+                            stgItem.status === 'SKIPPED' ? "bg-amber-500/10 text-amber-400 border-amber-500/20" :
+                            "bg-slate-800/50 text-slate-500 border-slate-700/50"
+                          )}>
+                            {stgItem.status}
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Human Approval Boundary Banner */}
+                  <div className="bg-slate-900/90 border border-amber-500/30 rounded-lg p-3 space-y-1.5 text-[10px]">
+                    <div className="flex justify-between items-center font-mono">
+                      <span className="text-slate-400 font-semibold uppercase">Autonomous Execution</span>
+                      <span className="text-emerald-400 font-bold px-1.5 py-0.2 rounded bg-emerald-500/10 border border-emerald-500/20">DISABLED</span>
+                    </div>
+                    <div className="flex justify-between items-center font-mono">
+                      <span className="text-slate-400 font-semibold uppercase">Mandatory Approval Role</span>
+                      <span className="text-sky-300 font-bold px-1.5 py-0.2 rounded bg-sky-500/10 border border-sky-500/20">COMPLIANCE_ANALYST</span>
+                    </div>
+                  </div>
+                </section>
+              )}
+
               {/* Evidence Collection Agent (Phase 1) */}
               {evidencePackage && evidencePackage.evidence && evidencePackage.evidence.length > 0 && (
                 <section className="bg-slate-900/50 rounded-xl p-4 border border-sky-500/20 space-y-3">
+
                   <div className="flex justify-between items-center pb-2 border-b border-border/60">
                     <h3 className="text-[10px] font-semibold uppercase tracking-wider text-sky-400 flex items-center gap-1.5">
                       <ShieldCheck className="w-3.5 h-3.5 text-sky-400" />
