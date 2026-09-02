@@ -5,8 +5,13 @@
 export const EVENT_TYPES = {
   TX_SCORED: 'tx_scored',
   CASE_UPDATED: 'case_updated',
-  ACTION_TAKEN: 'action_taken'
+  ACTION_TAKEN: 'action_taken',
+  TRANSACTION_ACTION: 'transaction.action',
+  AUTOMATION_ACTION: 'automation.action',
+  AUTOMATION_MODE_CHANGED: 'automation.mode.changed'
 };
+
+
 
 /**
  * @typedef {Object} TxScoredEvent

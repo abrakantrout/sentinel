@@ -42,10 +42,12 @@ def run_pipeline(tx: dict, store: dict) -> dict:
     else:
         # Fallback: Find case where sender or receiver is already in a chain
         receiver_id = tx.get("receiver_account")
-        case = next((c for c in store.get("cases", {}).values() 
-                     if (c["origin_account"] == sender_id or sender_id in c["chain"] or receiver_id in c["chain"]) 
-                     and c["status"] in ["NEW", "HIGH_RISK"]
-                     and len(c["chain"]) < c.get("max_nodes", 5)), None)
+        case = next((c for c in store.get("cases", {}).values()
+                     if isinstance(c, dict) and (c.get("origin_account") == sender_id or sender_id in c.get("chain", []) or receiver_id in c.get("chain", []))
+                     and c.get("status") in ["NEW", "HIGH_RISK"]
+                     and len(c.get("chain", [])) < c.get("max_nodes", 5)), None)
+
+
         if case:
             tx["case_id"] = case["case_id"]
 
@@ -214,7 +216,17 @@ def run_pipeline(tx: dict, store: dict) -> dict:
         
         # Add Edge representing the transaction flow
         amount = float(tx.get("amount", 0.0))
-        add_edge(case_id, sender_id, receiver_id, tx.get("tx_id"), amount, store)
+        extra_meta = {
+            "hop_number": tx.get("hop_number", 1),
+            "total_hops": tx.get("total_hops", 1),
+            "chain_id": tx.get("chain_id"),
+            "pattern_type": tx.get("pattern_type"),
+            "parent_transaction_id": tx.get("parent_transaction_id"),
+            "root_transaction_id": tx.get("root_transaction_id"),
+            "timestamp": tx.get("timestamp", "")
+        }
+        add_edge(case_id, sender_id, receiver_id, tx.get("tx_id"), amount, store, extra=extra_meta)
+
         
         # Fetch finalized graph
         graph = get_graph(case_id, store)
@@ -222,7 +234,40 @@ def run_pipeline(tx: dict, store: dict) -> dict:
         # 6. Call recovery_engine
         recovery = recalculate(case_id, store)
 
-    # 7. Store transaction globally
+    # 7. Evaluate Automated Response Policy & Phase 16 Autonomous Action Executor
+    automate_mode = bool(store.get("automation_mode", False))
+    from app.engines.autonomous_policy_engine import evaluate_autonomous_policy
+    from app.services.simulated_action_executor import execute_simulated_action
+    import asyncio
+
+    policy_decision = evaluate_autonomous_policy(
+        tx=tx,
+        case=case,
+        automate_mode=automate_mode
+    )
+
+    try:
+        execution_record = asyncio.run(
+            execute_simulated_action(
+                case_id=case.get("case_id") if case else tx.get("case_id"),
+                tx_id=tx.get("tx_id"),
+                action_code=policy_decision.get("action", "MONITOR"),
+                policy_decision=policy_decision,
+                actor_type="AUTOMATION_ENGINE"
+            )
+        )
+    except Exception:
+        execution_record = {
+            "execution_status": "SUCCESS" if (automate_mode and policy_decision.get("action") != "FREEZE") else "NOT_EXECUTED" if not automate_mode else "REQUIRES_OPERATOR_ACTION",
+            "actor_type": "AUTOMATION_ENGINE" if (automate_mode and policy_decision.get("action") != "FREEZE") else "HUMAN_OPERATOR",
+            "action_code": policy_decision.get("action", "MONITOR"),
+            "automation_mode": "AUTOMATE_ON" if automate_mode else "AUTOMATE_OFF"
+        }
+
+    tx["execution_record"] = execution_record
+    tx["response_decision"] = policy_decision
+
+    # 8. Store transaction globally
     tx_id = tx.get("tx_id")
     if tx_id:
         if "transactions" not in store:
@@ -234,5 +279,8 @@ def run_pipeline(tx: dict, store: dict) -> dict:
         "transaction": tx,
         "case": case,
         "graph": graph,
-        "recovery": recovery
+        "recovery": recovery,
+        "response_decision": policy_decision,
+        "execution_record": execution_record
     }
+

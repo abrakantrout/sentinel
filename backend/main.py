@@ -149,6 +149,12 @@ def _normalize_nodes(nodes: Any) -> list[dict[str, Any]]:
                 "id": str(account_id),
                 "status": node.get("status", "active"),
                 "balance": float(node.get("balance", 0.0)),
+                "account_type": node.get("account_type", "UNKNOWN"),
+                "inbound_count": int(node.get("inbound_count", 0)),
+                "outbound_count": int(node.get("outbound_count", 0)),
+                "total_inbound": float(node.get("total_inbound", 0.0)),
+                "total_outbound": float(node.get("total_outbound", 0.0)),
+                "risk_score": float(node.get("risk_score", 0.0))
             }
         )
     return normalized
@@ -175,10 +181,17 @@ def _normalize_edges(edges: Any) -> list[dict[str, Any]]:
                 "from": str(source),
                 "to": str(target),
                 "amount": float(edge.get("amount", 0.0)),
-                "timestamp": edge.get("timestamp"),
+                "timestamp": edge.get("timestamp", ""),
+                "hop_number": int(edge.get("hop_number", 1)),
+                "total_hops": int(edge.get("total_hops", 1)),
+                "chain_id": edge.get("chain_id") or f"CHAIN-{str(tx_id)[:8]}",
+                "pattern_type": edge.get("pattern_type") or "STANDARD",
+                "parent_transaction_id": edge.get("parent_transaction_id"),
+                "root_transaction_id": edge.get("root_transaction_id") or tx_id
             }
         )
     return normalized
+
 
 
 def _normalize_action_log(case: dict[str, Any]) -> list[dict[str, Any]]:
@@ -212,9 +225,11 @@ def _normalize_action_log(case: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _case_payload(case: dict[str, Any]) -> dict[str, Any]:
     case_id = case.get("case_id", "")
-    graph = data_store.get("graphs", {}).get(case_id, {"nodes": [], "edges": []})
+    from app.engines.graph_engine import build_investigation_graph
+    graph = build_investigation_graph(case_id, data_store)
     nodes = _normalize_nodes(graph.get("nodes", []))
     edges = _normalize_edges(graph.get("edges", []))
+
     # Fetch full transaction objects linked to this case
     tx_ids = case.get("transactions", [])
     tx_store = data_store.get("transactions", {})
@@ -265,6 +280,8 @@ class ActionRequest(BaseModel):
     account_id: str | None = None
     target_id: str | None = None
     reason: str | None = None
+    operator_id: str | None = "OPERATOR_ADMIN"
+
 
 
 class DispositionRequest(BaseModel):
@@ -337,6 +354,32 @@ async def _run_background_investigation(case_id: str, store: dict):
 
 
 
+async def _process_policy_and_action(transaction: dict[str, Any], case: dict[str, Any] | None, repo=None) -> tuple[dict[str, Any], dict[str, Any]]:
+    automate_mode = bool(data_store.get("automation_mode", False))
+    from app.engines.autonomous_policy_engine import evaluate_autonomous_policy
+    from app.services.simulated_action_executor import execute_simulated_action
+
+    policy_decision = evaluate_autonomous_policy(
+        tx=transaction,
+        case=case,
+        automate_mode=automate_mode
+    )
+
+    execution_record = await execute_simulated_action(
+        case_id=case.get("case_id") if case else transaction.get("case_id"),
+        tx_id=transaction.get("tx_id"),
+        action_code=policy_decision.get("action", "MONITOR"),
+        policy_decision=policy_decision,
+        repo=repo,
+        actor_type="AUTOMATION_ENGINE"
+    )
+
+
+    transaction["execution_record"] = execution_record
+    transaction["response_decision"] = policy_decision
+    return policy_decision, execution_record
+
+
 @app.post("/transaction")
 async def process_tx(
     request: Request,
@@ -368,8 +411,12 @@ async def process_tx(
 
     await repo.save_transaction_and_case(accounts_to_save, transaction, case)
 
+    policy_decision, execution_record = await _process_policy_and_action(transaction, case, repo=repo)
+    result["execution_record"] = execution_record
+
     if isinstance(repo, PostgreSQLCaseRepository):
         await repo.session.commit()
+
 
     tx_event = {
         "event": "tx_scored",
@@ -388,9 +435,72 @@ async def process_tx(
         "confidence": transaction.get("confidence", "LOW"),
         "ml_score": transaction.get("ml_score", 0),
         "rule_score": transaction.get("rule_score", 0),
-        "ml_feature_importance": transaction.get("ml_feature_importance", {})
+        "ml_feature_importance": transaction.get("ml_feature_importance", {}),
+        "account_status": execution_record.get("resulting_account_state", "ACTIVE"),
+        "execution_record": execution_record,
+        "policy_decision": policy_decision,
+        "response_decision": policy_decision
     }
     await manager.broadcast(tx_event)
+
+
+    # Broadcast transaction.action and automation WebSocket events
+    response_decision = result.get("response_decision") or {}
+    exec_status = execution_record.get("execution_status", "NOT_EXECUTED")
+    is_operator_req = (exec_status == "REQUIRES_OPERATOR_ACTION")
+
+    action_event = {
+        "event": "transaction.action",
+        "transaction_id": transaction.get("tx_id", ""),
+        "tx_id": transaction.get("tx_id", ""),
+        "risk_score": float(transaction.get("risk_score", 0.0)),
+        "risk_level": policy_decision.get("risk_level", "LOW"),
+        "action": policy_decision.get("action", "MONITOR"),
+        "action_status": exec_status,
+        "reason": policy_decision.get("reason", transaction.get("reason", "")),
+        "automated": bool(execution_record.get("automation_mode") == "AUTOMATE_ON" and not is_operator_req),
+        "mode": execution_record.get("automation_mode", "AUTOMATE_OFF"),
+        "requires_human_approval": bool(exec_status == "REJECTED" or is_operator_req),
+        "financial_action_status": "HUMAN AUTHORIZATION REQUIRED" if (exec_status == "REJECTED" or is_operator_req) else "NOT_APPLICABLE",
+        "case_id": case.get("case_id") if case else transaction.get("case_id", ""),
+        "investigation_run_id": response_decision.get("investigation_run_id", ""),
+        "timestamp": execution_record.get("timestamp") or _now_iso(),
+        "execution_record": execution_record,
+        "policy_decision": policy_decision
+    }
+    await manager.broadcast(action_event)
+
+    # Specific Phase 16 WebSocket event
+    if exec_status == "SUCCESS":
+        ws_event_name = "automation.action.executed"
+    elif is_operator_req:
+        ws_event_name = "automation.action.requires_operator"
+    elif exec_status == "REJECTED" or exec_status == "NOT_EXECUTED":
+        ws_event_name = "automation.action.blocked"
+    else:
+        ws_event_name = "automation.action.failed"
+
+    automation_event = {
+        "event": ws_event_name,
+        "case_id": case.get("case_id") if case else transaction.get("case_id", ""),
+        "transaction_id": transaction.get("tx_id", ""),
+        "tx_id": transaction.get("tx_id", ""),
+        "account_id": transaction.get("sender_account", "UNKNOWN"),
+        "risk_score": float(transaction.get("risk_score", 0.0)),
+        "risk_level": policy_decision.get("risk_level", "CRITICAL"),
+        "action_code": policy_decision.get("action", "FREEZE"),
+        "policy_rule_id": policy_decision.get("policy_rule_id", "POL-DEFAULT"),
+        "policy_decision": policy_decision.get("decision", "EXECUTE"),
+        "execution_status": exec_status,
+        "reason": policy_decision.get("reason", ""),
+        "execution_result": execution_record,
+        "action_executed": exec_status == "SUCCESS",
+        "timestamp": execution_record.get("timestamp") or _now_iso()
+    }
+    await manager.broadcast(automation_event)
+
+
+
 
     if case:
         case_id = case.get("case_id")
@@ -408,11 +518,11 @@ async def process_tx(
         case_event = {"event": "case_updated", **_case_payload(case)}
         await manager.broadcast(case_event)
 
-
     if isinstance(repo, PostgreSQLCaseRepository):
         await repo.session.commit()
 
     return result
+
 
 
 
@@ -425,6 +535,37 @@ async def get_cases(
 ) -> list[dict[str, Any]]:
     case_list = await repo.get_cases()
     return [_case_payload(c) for c in case_list]
+
+
+@app.get("/cases/{case_id}")
+async def get_case_by_id(
+    case_id: str,
+    repo: AbstractCaseRepository = Depends(get_repository)
+) -> dict[str, Any]:
+    case = data_store.get("cases", {}).get(case_id)
+    if not case:
+        case_list = await repo.get_cases()
+        case = next((c for c in case_list if c.get("case_id") == case_id), None)
+    if not case:
+        raise HTTPException(status_code=404, detail=f"Case '{case_id}' not found")
+    return _case_payload(case)
+
+
+@app.get("/cases/{case_id}/graph")
+def get_case_graph(case_id: str) -> dict[str, Any]:
+    from app.engines.graph_engine import build_investigation_graph
+    return build_investigation_graph(case_id, data_store)
+
+
+@app.get("/transactions/{tx_id}/graph")
+def get_transaction_graph(tx_id: str) -> dict[str, Any]:
+    tx = data_store.get("transactions", {}).get(tx_id)
+    if not tx:
+        raise HTTPException(status_code=404, detail=f"Transaction '{tx_id}' not found")
+    case_id = tx.get("case_id") or f"CASE-{tx_id[:8]}"
+    from app.engines.graph_engine import build_investigation_graph
+    return build_investigation_graph(case_id, data_store)
+
 
 
 @app.post("/cases/{case_id}/investigate")
@@ -1087,82 +1228,202 @@ def _record_action(case_id: str, action_type: str, target_id: str, status: str, 
     return entry
 
 
-async def _handle_action(action_name: str, payload: ActionRequest) -> dict[str, Any]:
-    case = data_store.get("cases", {}).get(payload.case_id)
-    target_id = payload.account_id or payload.target_id or "GLOBAL"
-    if not case:
-        return {
-            "ok": False,
-            "event": "action_taken",
-            "case_id": payload.case_id,
-            "action": action_name,
-            "target_id": target_id,
-            "status": "NACK",
-            "error": "case_not_found",
+async def _handle_action(action_name: str, payload: ActionRequest, repo=None) -> dict[str, Any]:
+    tx_id = payload.target_id or payload.account_id or "GLOBAL"
+    case_id = payload.case_id or "CASE-SYSTEM"
+
+    action_code_map = {
+        "freeze": "FREEZE",
+        "block": "BLOCK",
+        "reject": "REJECT_TRANSACTION",
+        "file_str": "FILE_STR",
+        "close_account": "CLOSE_ACCOUNT",
+        "monitor": "MONITOR",
+        "enhanced_monitoring": "ENHANCED_MONITORING",
+        "flag": "ESCALATE_ANALYST_REVIEW",
+        "alert": "ESCALATE_ANALYST_REVIEW",
+        "close": "CLOSE",
+        "close_fp": "MARK_FALSE_POSITIVE",
+        "escalate": "ESCALATE_ANALYST_REVIEW"
+    }
+    action_code = action_code_map.get(action_name.lower(), action_name.upper())
+
+    tx = data_store.get("transactions", {}).get(tx_id)
+    if not tx and case_id:
+        tx = next((t for t in data_store.get("transactions", {}).values() if t.get("case_id") == case_id), None)
+    if not tx:
+        tx = {
+            "tx_id": tx_id,
+            "case_id": case_id,
+            "sender_account": payload.account_id or "ACC-UNKNOWN",
+            "receiver_account": "ACC-UNKNOWN",
+            "amount": 1000.0,
+            "risk_score": 50
         }
 
-    if action_name == "freeze":
-        api_response = mock_bank_freeze(target_id, case.get("recoverable_amount", 0.0))
-        graph = data_store.get("graphs", {}).get(payload.case_id, {})
-        edges = graph.get("edges", [])
-        
-        def get_downstream(start_id):
-            downstream = {start_id}
-            queue = [start_id]
-            while queue:
-                curr = queue.pop(0)
-                for edge in edges:
-                    src = str(edge.get("source") or edge.get("from"))
-                    tgt = str(edge.get("target") or edge.get("to"))
-                    if src == curr and tgt not in downstream:
-                        downstream.add(tgt)
-                        queue.append(tgt)
-            return downstream
+    case_obj = data_store.get("cases", {}).get(case_id)
 
-        if target_id == "GLOBAL" or target_id == "SUSPECTS":
-            to_freeze = {str(edge.get("target") or edge.get("to")) for edge in edges}
-        else:
-            to_freeze = get_downstream(str(target_id))
+    from app.engines.autonomous_policy_engine import evaluate_autonomous_policy
+    pol = evaluate_autonomous_policy(tx, case_obj, automate_mode=True)
+    pol["decision"] = "EXECUTE"
+    pol["action"] = action_code
 
-        for node in graph.get("nodes", []):
-            acc_id = str(node.get("account_id") or node.get("id") or node.get("accountId"))
-            if acc_id in to_freeze:
-                node["status"] = "frozen"
-    elif action_name == "flag":
-        api_response = mock_telecom_flag(target_id)
-    elif action_name == "monitor":
-        api_response = mock_monitor_account(target_id)
-    elif action_name == "close":
-        api_response = mock_close_case(payload.case_id, "RESOLVED")
-    elif action_name == "close_fp":
-        api_response = mock_close_case(payload.case_id, "FALSE_POSITIVE")
-    else:
-        api_response = mock_police_alert(payload.case_id, {"reason": payload.reason or "Escalation requested"})
+    from app.services.simulated_action_executor import execute_simulated_action
+    exec_rec = await execute_simulated_action(
+        case_id=case_id,
+        tx_id=tx.get("tx_id", tx_id),
+        action_code=action_code,
+        policy_decision=pol,
+        repo=repo,
+        actor_type="HUMAN_OPERATOR",
+        actor_id=payload.operator_id or "HUMAN_OPERATOR"
+    )
 
-    status = api_response.get("status", "FAILED")
-    action_entry = _record_action(payload.case_id, action_name.upper(), target_id, status, payload.reason)
-    response = {
-        "ok": status == "SUCCESS",
+    await manager.broadcast({
+        "event": "automation.action.executed",
+        "action": action_code,
+        "action_code": action_code,
+        "transaction_id": tx.get("tx_id", tx_id),
+        "tx_id": tx.get("tx_id", tx_id),
+        "case_id": case_id,
+        "execution_result": exec_rec,
+        "policy_decision": pol,
+        "action_executed": True,
+        "actor_type": "HUMAN_OPERATOR",
+        "actor_id": payload.operator_id or "HUMAN_OPERATOR",
+        "timestamp": exec_rec.get("timestamp") or _now_iso()
+    })
+
+    await manager.broadcast({
+        "event": "transaction.action",
+        "transaction_id": tx.get("tx_id", tx_id),
+        "tx_id": tx.get("tx_id", tx_id),
+        "risk_score": tx.get("risk_score", 50),
+        "risk_level": pol.get("risk_level", "MEDIUM"),
+        "action": action_code,
+        "action_status": exec_rec.get("execution_status", "SUCCESS"),
+        "reason": payload.reason or pol.get("reason", "Action executed by human operator"),
+        "automated": False,
+        "actor_type": "HUMAN_OPERATOR",
+        "case_id": case_id,
+        "timestamp": exec_rec.get("timestamp") or _now_iso(),
+        "execution_record": exec_rec,
+        "policy_decision": pol
+    })
+
+    if case_obj:
+        await manager.broadcast({"event": "case_updated", **_case_payload(case_obj)})
+
+    return {
+        "ok": exec_rec.get("execution_status") == "SUCCESS",
         "event": "action_taken",
-        "case_id": payload.case_id,
-        "action": action_name,
-        "target_id": target_id,
-        "status": action_entry.get("status", "NACK"),
-        "action_id": action_entry.get("action_id"),
-        "timestamp": action_entry.get("timestamp", _now_iso()),
+        "case_id": case_id,
+        "action": action_code,
+        "target_id": payload.account_id or payload.target_id or "GLOBAL",
+        "status": "ACK" if exec_rec.get("execution_status") == "SUCCESS" else "NACK",
+        "execution_record": exec_rec
     }
 
-    await manager.broadcast(response)
-    await manager.broadcast({"event": "case_updated", **_case_payload(case)})
-    return response
+
+class FreezeRequestPayload(BaseModel):
+    operator_id: Optional[str] = "OPERATOR_ADMIN"
+    reason: Optional[str] = "Operator initiated account freeze"
+
+
+@app.post("/cases/{case_id}/transactions/{transaction_id}/freeze")
+@app.post("/transactions/{transaction_id}/freeze")
+async def execute_operator_freeze(
+    transaction_id: str,
+    case_id: Optional[str] = None,
+    payload: Optional[FreezeRequestPayload] = None,
+    repo: AbstractCaseRepository = Depends(get_repository)
+) -> dict[str, Any]:
+    tx = None
+    if isinstance(repo, PostgreSQLCaseRepository):
+        tx = await repo.get_transaction_by_id(transaction_id)
+    if not tx:
+        tx = data_store.get("transactions", {}).get(transaction_id)
+    if not tx:
+        raise HTTPException(status_code=404, detail=f"Transaction '{transaction_id}' not found.")
+
+    eff_case_id = case_id or tx.get("case_id") or "CASE-SYSTEM"
+    case_obj = None
+    if isinstance(repo, PostgreSQLCaseRepository):
+        case_obj = await repo.get_case_by_id(eff_case_id)
+    if not case_obj:
+        case_obj = data_store.get("cases", {}).get(eff_case_id)
+
+    closed_statuses = {"CLOSED_CONFIRMED_FRAUD", "CLOSED_FALSE_POSITIVE"}
+    if case_obj and case_obj.get("status") in closed_statuses:
+        raise HTTPException(status_code=400, detail=f"Case '{eff_case_id}' is closed and invalid for FREEZE.")
+
+    from app.engines.autonomous_policy_engine import evaluate_autonomous_policy
+    pol = evaluate_autonomous_policy(tx, case_obj, automate_mode=True)
+
+    req_act = tx.get("requested_action") or tx.get("action")
+    score = float(tx.get("risk_score", 0.0))
+    if pol.get("action") != "FREEZE" and req_act != "FREEZE" and score < 70:
+        raise HTTPException(status_code=403, detail="Arbitrary FREEZE request rejected: policy engine does not authorize FREEZE for this transaction.")
+
+    op_id = (payload.operator_id if payload else None) or "OPERATOR_ADMIN"
+    from app.services.simulated_action_executor import execute_simulated_action
+    exec_rec = await execute_simulated_action(
+        case_id=eff_case_id,
+        tx_id=transaction_id,
+        action_code="FREEZE",
+        policy_decision=pol,
+        repo=repo,
+        actor_type="HUMAN_OPERATOR",
+        actor_id=op_id
+    )
+
+    if isinstance(repo, PostgreSQLCaseRepository):
+        await repo.session.commit()
+
+    await manager.broadcast({
+        "event": "automation.action.executed",
+        "action": "FREEZE",
+        "action_code": "FREEZE",
+        "transaction_id": transaction_id,
+        "tx_id": transaction_id,
+        "case_id": eff_case_id,
+        "execution_result": exec_rec,
+        "policy_decision": pol,
+        "action_executed": True,
+        "actor_type": "HUMAN_OPERATOR",
+        "actor_id": op_id,
+        "timestamp": exec_rec.get("timestamp") or _now_iso()
+    })
+
+    await manager.broadcast({
+        "event": "transaction.action",
+        "transaction_id": transaction_id,
+        "tx_id": transaction_id,
+        "risk_score": score,
+        "risk_level": pol.get("risk_level", "CRITICAL"),
+        "action": "FREEZE",
+        "action_status": "SUCCESS",
+        "reason": pol.get("reason", "Operator executed account freeze"),
+        "automated": False,
+        "actor_type": "HUMAN_OPERATOR",
+        "actor_id": op_id,
+        "case_id": eff_case_id,
+        "timestamp": exec_rec.get("timestamp") or _now_iso(),
+        "execution_record": exec_rec,
+        "policy_decision": pol
+    })
+
+    return exec_rec
 
 
 @app.post("/action/freeze")
 async def freeze_action(payload: ActionRequest) -> dict[str, Any]:
-    return await _handle_action("freeze", payload)
+    tx_id = payload.target_id or "TX-UNKNOWN"
+    return await execute_operator_freeze(transaction_id=tx_id, case_id=payload.case_id)
 
 
 @app.post("/action/flag")
+@app.post("/action/escalate")
 async def flag_action(payload: ActionRequest) -> dict[str, Any]:
     return await _handle_action("flag", payload)
 
@@ -1177,6 +1438,31 @@ async def monitor_action(payload: ActionRequest) -> dict[str, Any]:
     return await _handle_action("monitor", payload)
 
 
+@app.post("/action/enhanced_monitoring")
+async def enhanced_monitoring_action(payload: ActionRequest) -> dict[str, Any]:
+    return await _handle_action("enhanced_monitoring", payload)
+
+
+@app.post("/action/block")
+async def block_action(payload: ActionRequest) -> dict[str, Any]:
+    return await _handle_action("block", payload)
+
+
+@app.post("/action/reject")
+async def reject_action(payload: ActionRequest) -> dict[str, Any]:
+    return await _handle_action("reject", payload)
+
+
+@app.post("/action/file_str")
+async def file_str_action(payload: ActionRequest) -> dict[str, Any]:
+    return await _handle_action("file_str", payload)
+
+
+@app.post("/action/close_account")
+async def close_account_action(payload: ActionRequest) -> dict[str, Any]:
+    return await _handle_action("close_account", payload)
+
+
 @app.post("/action/close")
 async def close_action(payload: ActionRequest) -> dict[str, Any]:
     return await _handle_action("close", payload)
@@ -1187,48 +1473,202 @@ async def close_fp_action(payload: ActionRequest) -> dict[str, Any]:
     return await _handle_action("close_fp", payload)
 
 
+
+class AutomationModeRequest(BaseModel):
+    enabled: bool
+    operator_id: Optional[str] = "OPERATOR_ADMIN"
+
+
+@app.get("/automation-mode")
+async def get_automation_mode() -> dict[str, Any]:
+    return {
+        "automate_mode": data_store.get("automation_mode", False),
+        "updated_at": data_store.get("automation_mode_updated_at"),
+        "updated_by": data_store.get("automation_mode_updated_by", "SYSTEM")
+    }
+
+
+@app.post("/automation-mode")
+async def set_automation_mode(
+    payload: AutomationModeRequest,
+    repo: AbstractCaseRepository = Depends(get_repository)
+) -> dict[str, Any]:
+    enabled = bool(payload.enabled)
+    data_store["automation_mode"] = enabled
+    now_str = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    data_store["automation_mode_updated_at"] = now_str
+    data_store["automation_mode_updated_by"] = payload.operator_id or "OPERATOR_ADMIN"
+
+    event_type = "AUTOMATION_MODE_ENABLED" if enabled else "AUTOMATION_MODE_DISABLED"
+
+    audit_record = {
+        "audit_id": f"AUD-MODE-{str(uuid4())[:8].upper()}",
+        "event_type": event_type,
+
+        "case_id": "CASE-SYSTEM",
+        "primary_tx_id": "TX-SYSTEM-MODE",
+        "analyst_id": payload.operator_id or "OPERATOR_ADMIN",
+        "analyst_role": "OPERATOR",
+        "action_code": "TOGGLE_AUTOMATION_MODE",
+        "previous_case_status": "NEW",
+        "new_case_status": "NEW",
+        "analyst_notes": f"AUTOMATE MODE set to {'ON' if enabled else 'OFF'} by {payload.operator_id or 'OPERATOR_ADMIN'}",
+        "risk_acknowledged": False,
+        "decision_support_summary": {
+            "automate_mode": enabled,
+            "event_type": event_type,
+            "operator_id": payload.operator_id or "OPERATOR_ADMIN",
+            "timestamp": now_str
+        },
+        "traceability_chain": {
+            "automate_mode": enabled,
+            "event_type": event_type,
+            "operator_id": payload.operator_id or "OPERATOR_ADMIN",
+            "timestamp": now_str
+        },
+        "timestamp": now_str
+    }
+
+    try:
+        await repo.save_audit_event(audit_record)
+        if isinstance(repo, PostgreSQLCaseRepository):
+            await repo.session.commit()
+    except Exception as err:
+        print(f"[Main] Warning: Failed to persist mode change audit: {err}")
+
+    await manager.broadcast({
+        "event": "automation.mode.changed",
+        "automate_mode": enabled,
+        "updated_at": now_str,
+        "updated_by": payload.operator_id or "OPERATOR_ADMIN"
+    })
+
+    # When Automation Mode is set to ON, sweep pending eligible transactions
+    if enabled:
+        from app.engines.autonomous_policy_engine import evaluate_autonomous_policy
+        from app.services.simulated_action_executor import execute_simulated_action
+        
+        tx_dict = data_store.get("transactions", {})
+        cases_dict = data_store.get("cases", {})
+
+        for tx_id, tx in list(tx_dict.items()):
+            exec_rec = tx.get("execution_record") or {}
+            exec_status = exec_rec.get("execution_status")
+            if exec_status in ("NOT_EXECUTED", None) or exec_rec.get("automation_mode") == "AUTOMATE_OFF":
+                case_id = tx.get("case_id")
+                case_obj = cases_dict.get(case_id) if case_id else None
+                pol = evaluate_autonomous_policy(tx, case_obj, automate_mode=True)
+                
+                if pol.get("action") != "FREEZE" and pol.get("decision") == "EXECUTE":
+                    updated_rec = await execute_simulated_action(
+                        case_id=case_id,
+                        tx_id=tx_id,
+                        action_code=pol.get("action", "MONITOR"),
+                        policy_decision=pol,
+                        repo=repo,
+                        actor_type="AUTOMATION_ENGINE",
+                        actor_id="AUTOMATION_ENGINE"
+                    )
+                    tx["execution_record"] = updated_rec
+                    tx["response_decision"] = pol
+
+                    await manager.broadcast({
+                        "event": "automation.action.executed",
+                        "action": pol.get("action"),
+                        "action_code": pol.get("action"),
+                        "transaction_id": tx_id,
+                        "tx_id": tx_id,
+                        "case_id": case_id,
+                        "execution_result": updated_rec,
+                        "policy_decision": pol,
+                        "action_executed": True,
+                        "actor_type": "AUTOMATION_ENGINE",
+                        "timestamp": updated_rec.get("timestamp") or _now_iso()
+                    })
+
+                    await manager.broadcast({
+                        "event": "transaction.action",
+                        "transaction_id": tx_id,
+                        "tx_id": tx_id,
+                        "risk_score": tx.get("risk_score", 0),
+                        "risk_level": pol.get("risk_level", "LOW"),
+                        "action": pol.get("action"),
+                        "action_status": "SUCCESS",
+                        "reason": pol.get("reason", "Autonomous execution on mode enable"),
+                        "automated": True,
+                        "actor_type": "AUTOMATION_ENGINE",
+                        "case_id": case_id,
+                        "timestamp": updated_rec.get("timestamp") or _now_iso(),
+                        "execution_record": updated_rec,
+                        "policy_decision": pol
+                    })
+
+    return {
+        "status": "success",
+        "automate_mode": enabled,
+    }
+
+
+
 @app.post("/attack-mode")
 async def trigger_attack_mode() -> dict[str, Any]:
     """
-    Triggers a burst of 5 high-risk transactions to simulate an active fraud attack.
-    Each transaction is injected directly into the pipeline and broadcast via WebSocket.
+    Triggers a connected suspicious multi-hop attack chain (5 hops across 6 nodes).
+    Generates ACC-ATTACK-SOURCE -> ACC-MULE-01 -> ACC-INTERMEDIARY-01 -> ACC-MULE-02 -> ACC-INTERMEDIARY-02 -> ACC-DRAIN-DESTINATION.
+    Injects each hop into the pipeline under a single case_id and broadcasts updates via WebSocket.
+    The final hop triggers CRITICAL risk score and FREEZE policy evaluation.
     """
     import asyncio, random, string, uuid as _uuid
     from datetime import datetime, timezone as _tz
 
-    def _rnd_id():
-        return f"TX-{str(_uuid.uuid4())[:8].upper()}"
-
-    def _rnd_acc(prefix):
-        sfx = "".join(random.choices(string.ascii_uppercase + string.digits, k=4))
-        return f"{prefix}-{sfx}-{random.randint(1000,9999)}"
-
     def _now():
         return datetime.now(_tz.utc).isoformat().replace("+00:00", "Z")
 
-    ATTACK_TEMPLATES = [
-        {"is_cross_border": True, "channel": "NEFT",  "amount_range": (200000, 500000)},
-        {"is_crypto_related": True, "channel": "IMPS", "amount_range": (300000, 500000)},
-        {"device_changed": True, "location_changed": True, "channel": "UPI", "amount_range": (50000, 100000)},
-        {"on_active_call": True, "is_scripted": True,  "channel": "CARD", "amount_range": (100000, 200000)},
-        {"bulk_transfer_flag": True, "channel": "NEFT", "amount_range": (250000, 500000)},
+    chain_id = f"CHAIN-ATTACK-{_uuid.uuid4().hex[:8].upper()}"
+    case_id = f"CASE-{chain_id[6:]}"
+    root_tx_id = f"TX-ATTACK-001"
+
+    attack_nodes = [
+        ("ACC-ATTACK-SOURCE", "SOURCE"),
+        ("ACC-MULE-01", "MULE"),
+        ("ACC-INTERMEDIARY-01", "INTERMEDIARY"),
+        ("ACC-MULE-02", "MULE"),
+        ("ACC-INTERMEDIARY-02", "INTERMEDIARY"),
+        ("ACC-DRAIN-DESTINATION", "DESTINATION")
+    ]
+
+    ATTACK_HOPS = [
+        {"is_cross_border": True, "channel": "NEFT", "amount": 480000.0, "risk_score": 75},
+        {"is_crypto_related": True, "channel": "IMPS", "amount": 465000.0, "risk_score": 80},
+        {"device_changed": True, "location_changed": True, "channel": "UPI", "amount": 450000.0, "risk_score": 85},
+        {"on_active_call": True, "is_scripted": True, "channel": "CARD", "amount": 435000.0, "risk_score": 90},
+        {"bulk_transfer_flag": True, "channel": "NEFT", "amount": 420000.0, "risk_score": 98, "requested_action": "FREEZE", "reason": "Active multi-hop fraud attack chain detected requiring account freeze."}
     ]
 
     async def _fire_burst():
-        for tpl in ATTACK_TEMPLATES:
-            amount = round(random.uniform(*tpl["amount_range"]), 2)
+        for i, hspec in enumerate(ATTACK_HOPS):
+            tx_id = f"TX-ATTACK-00{i+1}"
+            sender_acc = attack_nodes[i][0]
+            receiver_acc = attack_nodes[i+1][0]
             tx = {
-                "tx_id": _rnd_id(),
+                "tx_id": tx_id,
                 "timestamp": _now(),
-                "sender_account": _rnd_acc("ACC-ATTACK"),
-                "receiver_account": _rnd_acc("ACC-DRAIN"),
-                "amount": amount,
+                "case_id": case_id,
+                "sender_account": sender_acc,
+                "receiver_account": receiver_acc,
+                "amount": hspec["amount"],
                 "currency": "INR",
-                "channel": tpl.get("channel", "NEFT"),
-                "hop_number": 0,
+                "channel": hspec.get("channel", "NEFT"),
+                "chain_id": chain_id,
+                "hop_number": i + 1,
+                "total_hops": 5,
+                "pattern_type": "MULE_CHAIN",
+                "parent_transaction_id": f"TX-ATTACK-00{i}" if i > 0 else None,
+                "root_transaction_id": root_tx_id,
+                "risk_score": hspec["risk_score"]
             }
-            for k, v in tpl.items():
-                if k not in ("channel", "amount_range"):
+            for k, v in hspec.items():
+                if k not in ("channel", "amount"):
                     tx[k] = v
 
             result = run_pipeline(tx, data_store)
@@ -1245,9 +1685,9 @@ async def trigger_attack_mode() -> dict[str, Any]:
                 "channel": transaction.get("channel", "NEFT"),
                 "risk_factors": transaction.get("risk_factors", []),
                 "threshold": transaction.get("threshold", "LOW"),
-                "reason": transaction.get("reason", "Low risk pattern"),
+                "reason": transaction.get("reason", "Attack chain hop"),
                 "full_reason": transaction.get("full_reason", ""),
-                "confidence": transaction.get("confidence", "LOW"),
+                "confidence": transaction.get("confidence", "HIGH"),
                 "ml_score": transaction.get("ml_score", 0),
                 "rule_score": transaction.get("rule_score", 0),
                 "ml_feature_importance": transaction.get("ml_feature_importance", {})
@@ -1256,10 +1696,274 @@ async def trigger_attack_mode() -> dict[str, Any]:
             case = result.get("case")
             if case:
                 await manager.broadcast({"event": "case_updated", **_case_payload(case)})
-            await asyncio.sleep(0.8)
+            await asyncio.sleep(0.1)
 
-    asyncio.create_task(_fire_burst())
-    return {"ok": True, "message": "Attack mode burst initiated — 5 high-risk transactions injected"}
+    await _fire_burst()
+    return {"ok": True, "message": "Attack mode connected 5-hop chain initiated", "case_id": case_id, "chain_id": chain_id}
+
+
+
+
+@app.post("/simulate/multi_hop_scenario/{scenario_id}")
+async def trigger_multi_hop_scenario(
+    scenario_id: str,
+    repo: AbstractCaseRepository = Depends(get_repository)
+) -> dict[str, Any]:
+    """
+    Generates deterministic multi-hop transaction scenarios (Patterns A-F):
+    1. normal / scenario-1 (1 hop)
+    2. 3-hop / scenario-2 (3 hops)
+    3. 5-hop / scenario-3 (5-hop mule chain)
+    4. funnel / scenario-4 (Funnel account)
+    5. fan-out / scenario-5 (Fan-out distribution)
+    6. circular / scenario-6 (Circular flow)
+    """
+    s_key = scenario_id.lower().strip()
+    chain_id = f"CHAIN-{uuid4().hex[:8].upper()}"
+    case_id = f"CASE-{chain_id[6:]}"
+    ts = _now_iso()
+    generated_txs = []
+
+    if s_key in ("scenario-1", "normal", "1-hop"):
+        # Pattern A: Normal Payment (1-2 hops)
+        tx = {
+            "tx_id": f"TX-M1-001",
+            "timestamp": ts,
+            "case_id": case_id,
+            "sender_account": "ACC-USR-1023",
+            "receiver_account": "ACC-MERCH-4412",
+            "amount": 1500.0,
+            "risk_score": 15,
+            "channel": "UPI",
+            "chain_id": chain_id,
+            "hop_number": 1,
+            "total_hops": 1,
+            "pattern_type": "NORMAL_PAYMENT"
+        }
+        generated_txs.append(tx)
+
+    elif s_key in ("scenario-2", "3-hop"):
+        # Pattern B: 3-Hop Transfer
+        nodes = ["ACC-USR-1023", "ACC-INT-7732", "ACC-MULE-4821", "ACC-MERCH-4412"]
+        root_tx_id = f"TX-M3-001"
+        for i in range(len(nodes) - 1):
+            tx_id = f"TX-M3-00{i+1}"
+            tx = {
+                "tx_id": tx_id,
+                "timestamp": ts,
+                "case_id": case_id,
+                "sender_account": nodes[i],
+                "receiver_account": nodes[i+1],
+                "amount": round(45000.0 * (0.98 ** i), 2),
+                "risk_score": 65 + (i * 10),
+                "channel": "IMPS",
+                "chain_id": chain_id,
+                "hop_number": i + 1,
+                "total_hops": 3,
+                "pattern_type": "3_HOP_TRANSFER",
+                "parent_transaction_id": f"TX-M3-00{i}" if i > 0 else None,
+                "root_transaction_id": root_tx_id
+            }
+            generated_txs.append(tx)
+
+    elif s_key in ("scenario-3", "5-hop", "mule-chain"):
+        # Pattern B: 5-Hop Mule Chain / Layering (Critical FREEZE)
+        nodes = [
+            ("ACC-USR-1023", "SOURCE"),
+            ("ACC-MULE-4821", "MULE"),
+            ("ACC-INT-7732", "INTERMEDIARY"),
+            ("ACC-MULE-9182", "MULE"),
+            ("ACC-MERCH-4412", "DESTINATION")
+        ]
+        root_tx_id = f"TX-M5-001"
+        for i in range(len(nodes) - 1):
+            tx_id = f"TX-M5-00{i+1}"
+            s_acc, _ = nodes[i]
+            r_acc, _ = nodes[i+1]
+            tx = {
+                "tx_id": tx_id,
+                "timestamp": ts,
+                "case_id": case_id,
+                "sender_account": s_acc,
+                "receiver_account": r_acc,
+                "amount": round(98000.0 * (0.97 ** i), 2),
+                "risk_score": min(95, 75 + (i * 5)),
+                "requested_action": "FREEZE" if i == len(nodes) - 2 else "ENHANCED_MONITORING",
+                "reason": f"Multi-hop mule chain layering (Hop {i+1}/4) across rapid velocity accounts.",
+                "channel": "SWIFT" if i >= 2 else "NEFT",
+                "chain_id": chain_id,
+                "hop_number": i + 1,
+                "total_hops": 4,
+                "pattern_type": "MULE_CHAIN",
+                "parent_transaction_id": f"TX-M5-00{i}" if i > 0 else None,
+                "root_transaction_id": root_tx_id
+            }
+            generated_txs.append(tx)
+
+    elif s_key in ("scenario-4", "funnel"):
+        # Pattern C: Funnel Account (Multiple senders -> Funnel -> Destination)
+        senders = ["ACC-USR-101", "ACC-USR-102", "ACC-USR-103", "ACC-USR-104"]
+        funnel = "ACC-FUNNEL-9900"
+        dest = "ACC-MERCH-4412"
+        root_tx_id = f"TX-FN-001"
+        for i, s_acc in enumerate(senders):
+            tx = {
+                "tx_id": f"TX-FN-IN-00{i+1}",
+                "timestamp": ts,
+                "case_id": case_id,
+                "sender_account": s_acc,
+                "receiver_account": funnel,
+                "amount": 25000.0,
+                "risk_score": 70,
+                "channel": "UPI",
+                "chain_id": chain_id,
+                "hop_number": 1,
+                "total_hops": 2,
+                "pattern_type": "FUNNEL_ACCOUNT",
+                "root_transaction_id": root_tx_id
+            }
+            generated_txs.append(tx)
+        # Outflow from Funnel
+        generated_txs.append({
+            "tx_id": f"TX-FN-OUT-001",
+            "timestamp": ts,
+            "case_id": case_id,
+            "sender_account": funnel,
+            "receiver_account": dest,
+            "amount": 100000.0,
+            "risk_score": 88,
+            "channel": "NEFT",
+            "chain_id": chain_id,
+            "hop_number": 2,
+            "total_hops": 2,
+            "pattern_type": "FUNNEL_ACCOUNT",
+            "parent_transaction_id": "TX-FN-IN-001",
+            "root_transaction_id": root_tx_id
+        })
+
+    elif s_key in ("scenario-5", "fan-out"):
+        # Pattern D: Fan-Out (Source -> Multiple receivers)
+        source = "ACC-USR-1023"
+        receivers = ["ACC-RECV-A", "ACC-RECV-B", "ACC-RECV-C", "ACC-RECV-D"]
+        root_tx_id = f"TX-FO-001"
+        for i, r_acc in enumerate(receivers):
+            tx = {
+                "tx_id": f"TX-FO-00{i+1}",
+                "timestamp": ts,
+                "case_id": case_id,
+                "sender_account": source,
+                "receiver_account": r_acc,
+                "amount": 12500.0,
+                "risk_score": 82,
+                "channel": "IMPS",
+                "chain_id": chain_id,
+                "hop_number": 1,
+                "total_hops": 1,
+                "pattern_type": "FAN_OUT",
+                "root_transaction_id": root_tx_id
+            }
+            generated_txs.append(tx)
+
+    elif s_key in ("scenario-6", "circular"):
+        # Pattern E: Circular Flow (A -> B -> C -> D -> A)
+        nodes = ["ACC-A-101", "ACC-B-102", "ACC-C-103", "ACC-D-104", "ACC-A-101"]
+        root_tx_id = f"TX-CIRC-001"
+        for i in range(len(nodes) - 1):
+            tx = {
+                "tx_id": f"TX-CIRC-00{i+1}",
+                "timestamp": ts,
+                "case_id": case_id,
+                "sender_account": nodes[i],
+                "receiver_account": nodes[i+1],
+                "amount": 50000.0,
+                "risk_score": 90,
+                "channel": "NEFT",
+                "chain_id": chain_id,
+                "hop_number": i + 1,
+                "total_hops": 4,
+                "pattern_type": "CIRCULAR_FLOW",
+                "parent_transaction_id": f"TX-CIRC-00{i}" if i > 0 else None,
+                "root_transaction_id": root_tx_id
+            }
+            generated_txs.append(tx)
+
+    else:
+        raise HTTPException(status_code=400, detail=f"Unknown scenario_id '{scenario_id}'. Use scenario-1 to scenario-6.")
+
+    processed_records = []
+    from app.engines.autonomous_policy_engine import evaluate_autonomous_policy
+    from app.services.simulated_action_executor import execute_simulated_action
+
+    automate_mode = data_store.get("automation_mode", False)
+
+    for tx in generated_txs:
+        res = run_pipeline(tx, data_store)
+        transaction = res.get("transaction") or tx
+        case = res.get("case")
+
+        sender_id = transaction.get("sender_account")
+        receiver_id = transaction.get("receiver_account")
+        accounts_to_save = []
+        if sender_id:
+            accounts_to_save.append(data_store.get("accounts", {}).get(sender_id) or {"account_id": sender_id})
+        if receiver_id and receiver_id != sender_id:
+            accounts_to_save.append(data_store.get("accounts", {}).get(receiver_id) or {"account_id": receiver_id})
+
+        await repo.save_transaction_and_case(accounts_to_save, transaction, case)
+
+        p_dec = evaluate_autonomous_policy(tx=transaction, case=case, automate_mode=automate_mode)
+        exec_rec = await execute_simulated_action(
+            case_id=case.get("case_id") if case else transaction.get("case_id"),
+            tx_id=transaction.get("tx_id"),
+            action_code=p_dec.get("action", "MONITOR"),
+            policy_decision=p_dec,
+            repo=repo
+        )
+        transaction["execution_record"] = exec_rec
+        res["execution_record"] = exec_rec
+
+        # Broadcast real-time events
+        await manager.broadcast({
+            "event": "tx_scored",
+            "tx_id": transaction.get("tx_id"),
+            "timestamp": transaction.get("timestamp"),
+            "case_id": transaction.get("case_id"),
+            "risk_score": float(transaction.get("risk_score", 0.0)),
+            "amount": float(transaction.get("amount", 0.0)),
+            "sender_account": sender_id,
+            "receiver_account": receiver_id,
+            "channel": transaction.get("channel", "UPI"),
+            "chain_id": transaction.get("chain_id"),
+            "hop_number": transaction.get("hop_number"),
+            "total_hops": transaction.get("total_hops"),
+            "pattern_type": transaction.get("pattern_type")
+        })
+        if case:
+            await manager.broadcast({"event": "case_updated", **_case_payload(case)})
+
+        processed_records.append({
+            "tx_id": transaction.get("tx_id"),
+            "chain_id": transaction.get("chain_id"),
+            "hop_number": transaction.get("hop_number"),
+            "total_hops": transaction.get("total_hops"),
+            "pattern_type": transaction.get("pattern_type"),
+            "risk_score": transaction.get("risk_score"),
+            "action": p_dec.get("action"),
+            "execution_status": exec_rec.get("execution_status")
+        })
+
+    if isinstance(repo, PostgreSQLCaseRepository):
+        await repo.session.commit()
+
+    return {
+        "ok": True,
+        "scenario_id": s_key,
+        "chain_id": chain_id,
+        "pattern_type": generated_txs[0].get("pattern_type"),
+        "total_transactions": len(processed_records),
+        "transactions": processed_records
+    }
+
 
 
 async def _baseline_loop():
@@ -1314,6 +2018,14 @@ async def _baseline_loop():
 
             result = run_pipeline(tx, data_store)
             transaction = result.get("transaction") or {}
+            case = result.get("case")
+
+            policy_decision, execution_record = await _process_policy_and_action(transaction, case, repo=None)
+
+            if "transactions" not in data_store:
+                data_store["transactions"] = {}
+            data_store["transactions"][transaction.get("tx_id")] = transaction
+
             tx_event = {
                 "event": "tx_scored",
                 "tx_id": transaction.get("tx_id", ""),
@@ -1331,12 +2043,39 @@ async def _baseline_loop():
                 "confidence": transaction.get("confidence", "LOW"),
                 "ml_score": transaction.get("ml_score", 0),
                 "rule_score": transaction.get("rule_score", 0),
-                "ml_feature_importance": transaction.get("ml_feature_importance", {})
+                "ml_feature_importance": transaction.get("ml_feature_importance", {}),
+                "account_status": execution_record.get("resulting_account_state", "ACTIVE"),
+                "execution_record": execution_record,
+                "policy_decision": policy_decision,
+                "response_decision": policy_decision
             }
             await manager.broadcast(tx_event)
-            case = result.get("case")
+
+            exec_status = execution_record.get("execution_status", "NOT_EXECUTED")
+            is_operator_req = (exec_status == "REQUIRES_OPERATOR_ACTION")
+
+            await manager.broadcast({
+                "event": "transaction.action",
+                "transaction_id": transaction.get("tx_id", ""),
+                "tx_id": transaction.get("tx_id", ""),
+                "risk_score": float(transaction.get("risk_score", 0.0)),
+                "risk_level": policy_decision.get("risk_level", "LOW"),
+                "action": policy_decision.get("action", "MONITOR"),
+                "action_status": exec_status,
+                "reason": policy_decision.get("reason", transaction.get("reason", "")),
+                "automated": bool(execution_record.get("automation_mode") == "AUTOMATE_ON" and not is_operator_req),
+                "mode": execution_record.get("automation_mode", "AUTOMATE_OFF"),
+                "requires_human_approval": bool(exec_status == "REJECTED" or is_operator_req),
+                "financial_action_status": "HUMAN AUTHORIZATION REQUIRED" if (exec_status == "REJECTED" or is_operator_req) else "NOT_APPLICABLE",
+                "case_id": case.get("case_id") if case else transaction.get("case_id", ""),
+                "timestamp": execution_record.get("timestamp") or _now_iso(),
+                "execution_record": execution_record,
+                "policy_decision": policy_decision
+            })
+
             if case:
                 await manager.broadcast({"event": "case_updated", **_case_payload(case)})
+
 
         except asyncio.CancelledError:
             break
@@ -1381,9 +2120,14 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 "confidence": transaction.get("confidence", "LOW"),
                 "ml_score": transaction.get("ml_score", 0),
                 "rule_score": transaction.get("rule_score", 0),
-                "ml_feature_importance": transaction.get("ml_feature_importance", {})
+                "ml_feature_importance": transaction.get("ml_feature_importance", {}),
+                "account_status": (transaction.get("execution_record") or {}).get("resulting_account_state", "ACTIVE"),
+                "execution_record": transaction.get("execution_record"),
+                "policy_decision": transaction.get("response_decision"),
+                "response_decision": transaction.get("response_decision")
             }
             await websocket.send_json(tx_event)
+
 
         while True:
             await websocket.receive_text()

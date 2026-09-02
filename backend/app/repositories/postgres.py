@@ -246,7 +246,50 @@ class PostgreSQLCaseRepository(AbstractCaseRepository):
             await self.session.rollback()
             raise
 
+    async def save_audit_event(self, audit_event_record: Dict[str, Any]) -> bool:
+        case_id = audit_event_record.get("case_id")
+        if not case_id:
+            return False
+
+        # Verify case_id exists in cases table before inserting audit_event
+        case_obj = await self.session.get(Case, case_id)
+        if not case_obj:
+            return False
+
+        ts_val = audit_event_record.get("timestamp")
+        if isinstance(ts_val, datetime):
+            audit_ts_dt = ts_val
+        elif isinstance(ts_val, str) and ts_val:
+            audit_ts_dt = datetime.fromisoformat(ts_val.replace("Z", "+00:00"))
+        else:
+            audit_ts_dt = datetime.now(timezone.utc)
+
+        audit_obj = AuditEvent(
+            audit_id=audit_event_record.get("audit_id"),
+            event_type=audit_event_record.get("event_type", "AUTOMATED_ACTION_EXECUTED"),
+            case_id=case_id,
+            primary_tx_id=audit_event_record.get("primary_tx_id"),
+            analyst_id=audit_event_record.get("analyst_id", "SYSTEM_AUTOMATION"),
+            analyst_role=audit_event_record.get("analyst_role", "AUTOMATION_ENGINE"),
+            action_code=audit_event_record.get("action_code", "UNKNOWN_ACTION"),
+            previous_case_status=audit_event_record.get("previous_case_status", "NEW"),
+            new_case_status=audit_event_record.get("new_case_status", "IN_PROGRESS"),
+            analyst_notes=audit_event_record.get("analyst_notes", ""),
+            risk_acknowledged=bool(audit_event_record.get("risk_acknowledged", False)),
+            decision_support_summary=audit_event_record.get("decision_support_summary", {}),
+            traceability_chain=audit_event_record.get("traceability_chain", {}),
+            timestamp=audit_ts_dt
+        )
+        self.session.add(audit_obj)
+        try:
+            await self.session.flush()
+            return True
+        except IntegrityError:
+            return False
+
+
     async def get_case_history(self, case_id: str) -> Dict[str, Any]:
+
         case_dict = await self.get_case_by_id(case_id)
         if not case_dict:
             return {

@@ -1,4 +1,4 @@
-import { useMemo, useCallback } from 'react';
+import { useMemo, useCallback, useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import { useWebSocket } from '../hooks/useWebSocket';
 import GraphModule from '../modules/GraphModule';
@@ -7,11 +7,27 @@ import ErrorBoundary from '../components/ErrorBoundary';
 const Graph = () => {
   const { caseId } = useParams();
   const { cases, actions, connectionStatus } = useWebSocket();
+  const [fetchedCase, setFetchedCase] = useState(null);
+
+  useEffect(() => {
+    if (!caseId) return;
+    const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
+    fetch(`${API_BASE}/cases/${caseId}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data && data.case_id) {
+          setFetchedCase(data);
+        }
+      })
+      .catch(() => {});
+  }, [caseId]);
 
   const selectedCase = useMemo(
     () => cases.find((c) => c.case_id === caseId) || null,
     [caseId, cases]
   );
+
+  const activeCase = fetchedCase || selectedCase;
 
   const handleAction = useCallback(async (type, payload) => {
     const endpointByType = {
@@ -50,20 +66,20 @@ const Graph = () => {
     }
   }, [caseId]);
 
-  if (cases.length === 0 && connectionStatus === 'LIVE') {
+  if (!activeCase && cases.length === 0 && connectionStatus === 'LIVE') {
     return <div className="p-6 text-sm text-muted-foreground">Loading case graph...</div>;
   }
 
-  if (connectionStatus === 'OFFLINE' && !selectedCase) {
+  if (connectionStatus === 'OFFLINE' && !activeCase) {
     return <div className="p-6 text-sm text-red-500">Graph unavailable while offline.</div>;
   }
 
-  if (!selectedCase) return null;
+  if (!activeCase) return null;
 
   return (
     <ErrorBoundary>
       <GraphModule
-        caseData={selectedCase}
+        caseData={activeCase}
         actions={actions}
         onAction={handleAction}
         connectionStatus={connectionStatus}
@@ -73,3 +89,4 @@ const Graph = () => {
 };
 
 export default Graph;
+

@@ -11,7 +11,10 @@ import Graph from './pages/Graph';
 
 import SystemStatusBar from './components/SystemStatusBar';
 import AttackModeToggle from './components/AttackModeToggle';
+import AutomateModeToggle from './components/AutomateModeToggle';
 import LiveAlertToast from './components/LiveAlertToast';
+
+import ActionTakenToast from './components/ActionTakenToast';
 import ErrorBoundary from './components/ErrorBoundary';
 import Login from './components/Login';
 import { getRole } from './roleStore';
@@ -19,6 +22,22 @@ import { getRole } from './roleStore';
 const App = () => {
   const { connectionStatus } = useWebSocket();
   const role = getRole();
+  const [automateMode, setAutomateMode] = React.useState(false);
+
+  React.useEffect(() => {
+    fetch('/automation-mode')
+      .then((res) => res.json())
+      .then((data) => setAutomateMode(Boolean(data.automate_mode)))
+      .catch(() => {});
+
+    const handleModeChange = (e) => {
+      if (e.detail && e.detail.automate_mode !== undefined) {
+        setAutomateMode(Boolean(e.detail.automate_mode));
+      }
+    };
+    window.addEventListener('sentinel_automation_mode_changed', handleModeChange);
+    return () => window.removeEventListener('sentinel_automation_mode_changed', handleModeChange);
+  }, []);
 
   if (!role) {
     return <Login />;
@@ -40,6 +59,8 @@ const App = () => {
     <Router>
       <div className="flex min-h-screen bg-background text-foreground relative font-sans antialiased overflow-hidden">
         <LiveAlertToast />
+        <ActionTakenToast />
+
         
         {/* Navigation Sidebar */}
         <aside className="w-64 border-r border-border bg-card flex flex-col justify-between shrink-0 select-none z-20 shadow-xl">
@@ -76,10 +97,29 @@ const App = () => {
               <SystemStatusBar status={connectionStatus} />
             </div>
 
-            {/* Attack Mode Section */}
-            <div className="pt-1">
+            {/* Controls Section */}
+            <div className="pt-1 space-y-2">
+              <AutomateModeToggle />
+              {automateMode ? (
+                <div className="p-2.5 rounded-xl bg-emerald-950/40 border border-emerald-500/30 text-[10px] font-mono space-y-1">
+                  <div className="text-emerald-300 font-bold tracking-wide flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                    AUTONOMOUS ACTIONS: ACTIVE
+                  </div>
+                  <div className="text-amber-300/90 font-medium tracking-tight">
+                    FREEZE: OPERATOR APPROVAL REQUIRED
+                  </div>
+                </div>
+              ) : (
+                <div className="p-2 bg-slate-900/60 border border-slate-800 rounded-lg text-[10px] font-mono text-slate-400 text-center font-bold tracking-wide">
+                  AUTONOMOUS ACTIONS: OFF
+                </div>
+
+              )}
               <AttackModeToggle />
             </div>
+
+
 
             {/* Navigation Menu */}
             <nav className="space-y-1 pt-2">

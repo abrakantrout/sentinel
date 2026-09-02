@@ -111,11 +111,15 @@ def score_transaction(tx: dict, account: dict) -> dict:
 
     hop_number = tx.get("hop_number", 0)
     
-    if hop_number > 0:
-        origin_score = tx.get("origin_score", 0)
-        risk_score = int(origin_score * (DECAY_FACTOR ** hop_number))
+    if tx.get("risk_score") and float(tx["risk_score"]) > 0:
+        risk_score = int(tx["risk_score"])
+    elif hop_number > 0:
+        calculated_base = max(70, sum(f["contribution"] for f in risk_factors))
+        origin_score = float(tx.get("origin_score") or calculated_base)
+        risk_score = int(origin_score * (DECAY_FACTOR ** max(0, hop_number - 1)))
     else:
         risk_score = min(100, sum(f["contribution"] for f in risk_factors))
+
         
     # Proportional Amount Scaler:
     critical_flags = ["on_active_call", "velocity_flag", "is_cross_border", "is_crypto_related", "device_changed", "is_remote_access_active", "is_scripted"]

@@ -175,6 +175,93 @@ const handleEvent = (payload = {}) => {
     return;
   }
 
+  if (type === EVENT_TYPES.TRANSACTION_ACTION || type === 'transaction.action') {
+    const actionPayload = {
+      transaction_id: payload.transaction_id || payload.tx_id || '',
+      tx_id: payload.tx_id || payload.transaction_id || '',
+      risk_score: Number(payload.risk_score || 0),
+      risk_level: payload.risk_level || 'LOW',
+      action: payload.action || 'MONITOR',
+      action_status: payload.action_status || 'COMPLETED',
+      reason: payload.reason || '',
+      automated: payload.automated !== undefined ? payload.automated : true,
+      requires_human_approval: Boolean(payload.requires_human_approval),
+      financial_action_status: payload.financial_action_status || 'NOT_APPLICABLE',
+      case_id: payload.case_id || '',
+      investigation_run_id: payload.investigation_run_id || '',
+      timestamp: payload.timestamp || new Date().toISOString()
+    };
+    setStore((prev) => {
+      const updatedTxList = prev.transactions.map((t) => {
+        if (t.tx_id === actionPayload.tx_id) {
+          return {
+            ...t,
+            response_decision: actionPayload,
+            action: actionPayload.action,
+            action_status: actionPayload.action_status,
+            requires_human_approval: actionPayload.requires_human_approval,
+            financial_action_status: actionPayload.financial_action_status
+          };
+        }
+        return t;
+      });
+      return {
+        ...prev,
+        transactions: updatedTxList,
+        actions: [actionPayload, ...prev.actions]
+      };
+    });
+    window.dispatchEvent(new CustomEvent('sentinel_transaction_action', { detail: actionPayload }));
+    return;
+  }
+
+  if (type === EVENT_TYPES.AUTOMATION_MODE_CHANGED || type === 'automation.mode.changed') {
+    setStore((prev) => ({
+      ...prev,
+      automation_mode: Boolean(payload.automate_mode)
+    }));
+    window.dispatchEvent(new CustomEvent('sentinel_automation_mode_changed', { detail: payload }));
+    return;
+  }
+
+  if (
+    type === 'automation.action.executed' ||
+    type === 'automation.action.requires_operator' ||
+    type === 'automation.action.blocked' ||
+    type === 'automation.action.failed' ||
+    type === EVENT_TYPES.AUTOMATION_ACTION ||
+    type === 'automation.action'
+  ) {
+    const txId = payload.transaction_id || payload.tx_id;
+    const execRec = payload.execution_result || {};
+    const accStatus = execRec.resulting_account_state || payload.account_status;
+
+    if (txId) {
+      setStore((prev) => {
+        const updatedTxList = prev.transactions.map((t) => {
+          if (t.tx_id === txId) {
+            return {
+              ...t,
+              account_status: accStatus || t.account_status,
+              execution_record: { ...t.execution_record, ...execRec },
+              action: payload.action_code || execRec.action_code || t.action,
+              action_status: payload.execution_status || execRec.execution_status || t.action_status
+            };
+          }
+          return t;
+        });
+        return {
+          ...prev,
+          transactions: updatedTxList
+        };
+      });
+    }
+    window.dispatchEvent(new CustomEvent('sentinel_automation_action', { detail: payload }));
+    return;
+  }
+
+
+
   if (type === EVENT_TYPES.ACTION_TAKEN) {
     const incoming = normalizeAction(payload);
     setStore((prev) => ({
@@ -188,6 +275,7 @@ const handleEvent = (payload = {}) => {
     }));
   }
 };
+
 
 const connectWS = () => {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;

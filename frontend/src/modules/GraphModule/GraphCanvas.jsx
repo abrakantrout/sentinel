@@ -6,9 +6,9 @@ import { maskAccount } from '../../utils/maskAccount';
 
 const formatTransactionLabel = (edge) => {
   const amount = Number(edge.amount || 0);
-  const time = edge.time || edge.timestamp || '';
   const formattedAmount = new Intl.NumberFormat('en-IN').format(amount);
-  return time ? `\u20B9${formattedAmount} \u00B7 ${time}` : `\u20B9${formattedAmount}`;
+  const hopStr = edge.hop_number ? ` \u00B7 Hop ${edge.hop_number}${edge.total_hops ? '/' + edge.total_hops : ''}` : '';
+  return `\u20B9${formattedAmount}${hopStr}`;
 };
 
 const getGraphBounds = (container) => {
@@ -129,12 +129,6 @@ const applyDashboardLayout = (cy, nodes, edges, container, animate) => {
   });
 };
 
-/**
- * GraphCanvas (Phase 5 - Live)
- *
- * Dynamically adds new nodes and edges as they arrive from the backend.
- * Synchronizes status changes for existing nodes.
- */
 const layoutConfig = {
   name: 'breadthfirst',
   directed: true,
@@ -143,15 +137,19 @@ const layoutConfig = {
   avoidOverlap: true
 };
 
-const GraphCanvas = forwardRef(({ nodes = [], edges = [], onNodeClick }, ref) => {
+const GraphCanvas = forwardRef(({ nodes = [], edges = [], onNodeClick, onEdgeClick, onSelectionChange }, ref) => {
   const containerRef = useRef(null);
   const cyRef = useRef(null);
   const isInitializedRef = useRef(false);
   const onNodeClickRef = useRef(onNodeClick);
+  const onEdgeClickRef = useRef(onEdgeClick);
+  const onSelectionChangeRef = useRef(onSelectionChange);
 
   useEffect(() => {
     onNodeClickRef.current = onNodeClick;
-  }, [onNodeClick]);
+    onEdgeClickRef.current = onEdgeClick;
+    onSelectionChangeRef.current = onSelectionChange;
+  }, [onNodeClick, onEdgeClick, onSelectionChange]);
 
   useImperativeHandle(ref, () => ({
     highlightNode: (nodeId, duration = 1000) => {
@@ -194,20 +192,49 @@ const GraphCanvas = forwardRef(({ nodes = [], edges = [], onNodeClick }, ref) =>
 
     cyRef.current = cy;
     isInitializedRef.current = true;
+
     cy.on('tap', 'node', (evt) => {
       const node = evt.target;
-      onNodeClickRef.current?.({ id: node.id(), status: node.data('status') });
+      cy.elements().removeClass('path-highlight');
+
+      const pathElements = node.successors().union(node.predecessors()).union(node);
+      pathElements.addClass('path-highlight');
+
+      const edgeCount = pathElements.edges().length;
+      const hopCount = edgeCount > 0 ? edgeCount : 1;
+      onSelectionChangeRef.current?.({ type: 'node', id: node.id(), hops: hopCount });
+      onNodeClickRef.current?.(node.data());
     });
+
+    cy.on('tap', 'edge', (evt) => {
+      const edge = evt.target;
+      cy.elements().removeClass('path-highlight');
+
+      const sourceNode = edge.source();
+      const pathElements = sourceNode.successors().union(sourceNode.predecessors()).union(sourceNode).union(edge);
+      pathElements.addClass('path-highlight');
+
+      const totalHops = edge.data('total_hops') || pathElements.edges().length || 1;
+      onSelectionChangeRef.current?.({
+        type: 'edge',
+        id: edge.id(),
+        hops: totalHops
+      });
+      onEdgeClickRef.current?.(edge.data());
+    });
+
 
     cy.on('tap', (evt) => {
       if (evt.target === cy) {
+        cy.elements().removeClass('path-highlight');
         cy.edges().removeClass('show-label');
+        onSelectionChangeRef.current?.(null);
         onNodeClickRef.current?.(null);
+        onEdgeClickRef.current?.(null);
       }
     });
 
-    cy.on('mouseover tap', 'edge', (evt) => {
-      cy.edges().removeClass('show-label');
+    cy.on('mouseover', 'edge', (evt) => {
       evt.target.addClass('show-label');
     });
 

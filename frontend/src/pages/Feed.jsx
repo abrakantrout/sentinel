@@ -2,17 +2,192 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useWebSocket } from '../hooks/useWebSocket';
 import RiskBadge from '../components/RiskBadge';
 import InvestigationSidebar from '../components/InvestigationSidebar';
+import AutomationAuditDrawer from '../components/AutomationAuditDrawer';
 import { getRole } from '../roleStore';
 import { maskAccount } from '../utils/maskAccount';
-import { Activity, Zap, AlertTriangle, ShieldCheck, ArrowRight, Layers } from 'lucide-react';
+import { Activity, Zap, AlertTriangle, ShieldCheck, ArrowRight, Layers, FileText, Lock, X, CheckCircle2 } from 'lucide-react';
 
 const Feed = () => {
   const { transactions, cases, actions } = useWebSocket();
   const [sidebarState, setSidebarState] = useState({ isOpen: false, tx: null, case: null });
+  const [selectedAuditTx, setSelectedAuditTx] = useState(null);
   const [newTxIds, setNewTxIds] = useState(new Set());
+  const [freezingTxIds, setFreezingTxIds] = useState(new Set());
+  const [freezeModalState, setFreezeModalState] = useState({ isOpen: false, tx: null });
+  const [actionModalState, setActionModalState] = useState({ isOpen: false, tx: null, actionCode: '' });
+  const [executingActionTxIds, setExecutingActionTxIds] = useState(new Set());
+
+  const handleManualAction = async (e, tx, actionCode) => {
+    e.stopPropagation();
+    const consequential = ['BLOCK', 'REJECT_TRANSACTION', 'FILE_STR', 'CLOSE_ACCOUNT'];
+    if (consequential.includes(actionCode)) {
+      setActionModalState({ isOpen: true, tx, actionCode });
+    } else {
+      await executeManualAction(tx, actionCode);
+    }
+  };
+
+  const executeManualAction = async (tx, actionCode) => {
+    if (!tx) return;
+    const txId = tx.tx_id;
+    const caseId = tx.case_id || "CASE-SYSTEM";
+    setExecutingActionTxIds((prev) => new Set([...prev, txId]));
+    setActionModalState({ isOpen: false, tx: null, actionCode: '' });
+
+    const endpointMap = {
+      MONITOR: '/action/monitor',
+      ENHANCED_MONITORING: '/action/enhanced_monitoring',
+      MARK_FALSE_POSITIVE: '/action/close_fp',
+      ESCALATE_ANALYST_REVIEW: '/action/flag',
+      BLOCK: '/action/block',
+      REJECT_TRANSACTION: '/action/reject',
+      FILE_STR: '/action/file_str',
+      CLOSE_ACCOUNT: '/action/close_account'
+    };
+
+    const endpoint = endpointMap[actionCode] || '/action/monitor';
+
+    try {
+      let res;
+      try {
+        res = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ case_id: caseId, target_id: txId, account_id: tx.sender_account, operator_id: 'HUMAN_OPERATOR' })
+        });
+      } catch {
+        res = await fetch(`http://localhost:8000${endpoint}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ case_id: caseId, target_id: txId, account_id: tx.sender_account, operator_id: 'HUMAN_OPERATOR' })
+        });
+      }
+
+      if (!res.ok) throw new Error('Action failed');
+
+      const data = await res.json();
+      const execRec = data.execution_record || {};
+
+      tx.execution_record = {
+        ...execRec,
+        execution_status: 'SUCCESS',
+        actor_type: 'HUMAN_OPERATOR'
+      };
+
+      window.dispatchEvent(new CustomEvent('sentinel_transaction_action', {
+        detail: {
+          transaction_id: txId,
+          tx_id: txId,
+          account_id: tx.sender_account,
+          risk_score: tx.risk_score,
+          risk_level: tx.risk_score >= 80 ? 'HIGH' : 'MEDIUM',
+          action: actionCode,
+          action_status: 'SUCCESS',
+          actor_type: 'HUMAN_OPERATOR',
+          execution_record: tx.execution_record
+        }
+      }));
+    } catch (err) {
+      console.error('Manual action execution failed:', err);
+    } finally {
+      setExecutingActionTxIds((prev) => {
+        const next = new Set(prev);
+        next.delete(txId);
+        return next;
+      });
+    }
+  };
+
   const previousTxIdsRef = useRef(new Set());
   const role = getRole();
-  
+
+
+  const handleOpenFreezeModal = (e, tx) => {
+    e.stopPropagation();
+    setFreezeModalState({ isOpen: true, tx });
+  };
+
+  const handleCloseFreezeModal = () => {
+    setFreezeModalState({ isOpen: false, tx: null });
+  };
+
+  const handleConfirmFreeze = async () => {
+    const tx = freezeModalState.tx;
+    if (!tx) return;
+
+    const caseId = tx.case_id || "CASE-SYSTEM";
+    const txId = tx.tx_id;
+
+    setFreezingTxIds((prev) => new Set([...prev, txId]));
+    handleCloseFreezeModal();
+
+    try {
+      let res;
+      try {
+        res = await fetch(`/cases/${caseId}/transactions/${txId}/freeze`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ operator_id: 'OPERATOR_ADMIN', reason: 'Operator executed account freeze' })
+        });
+      } catch {
+        res = await fetch(`http://localhost:8000/cases/${caseId}/transactions/${txId}/freeze`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ operator_id: 'OPERATOR_ADMIN', reason: 'Operator executed account freeze' })
+        });
+      }
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || 'Freeze action failed');
+      }
+
+      const data = await res.json();
+      const execRec = data.execution_record || data.execution_result || {};
+
+      tx.account_status = 'FROZEN';
+      tx.execution_record = {
+        ...execRec,
+        execution_status: 'SUCCESS',
+        resulting_account_state: 'FROZEN',
+        actor_type: 'HUMAN_OPERATOR'
+      };
+
+      window.dispatchEvent(new CustomEvent('sentinel_transaction_action', {
+        detail: {
+          transaction_id: txId,
+          tx_id: txId,
+          account_id: tx.sender_account,
+          sender_account: tx.sender_account,
+          risk_score: tx.risk_score,
+          risk_level: tx.risk_score >= 85 ? 'CRITICAL' : 'HIGH',
+          action: 'FREEZE',
+          action_status: 'SUCCESS',
+          actor_type: 'HUMAN_OPERATOR',
+          execution_record: tx.execution_record,
+          reason: tx.reason || 'Operator executed account freeze'
+        }
+      }));
+    } catch (err) {
+      console.error('Freeze execution failed:', err);
+      window.dispatchEvent(new CustomEvent('sentinel_freeze_failed', {
+        detail: {
+          tx_id: txId,
+          transaction_id: txId,
+          account_id: tx.sender_account,
+          risk_score: tx.risk_score,
+          error: err.message || 'Backend policy authorization failed or server error'
+        }
+      }));
+    } finally {
+      setFreezingTxIds((prev) => {
+        const next = new Set(prev);
+        next.delete(txId);
+        return next;
+      });
+    }
+  };
+
   // Track new incoming transaction IDs for highlight animation
   useEffect(() => {
     if (transactions.length === 0) return;
@@ -149,59 +324,201 @@ const Feed = () => {
                       <th className="py-3 px-4">Sender → Receiver</th>
                       <th className="py-3 px-4 text-right">Amount</th>
                       <th className="py-3 px-4 text-center">Risk Score</th>
-                      <th className="py-3 px-4 text-left">Reason / Intelligence</th>
+                      <th className="py-3 px-4 text-center">Policy Action</th>
+                      <th className="py-3 px-4 text-center">Execution Status / Controls</th>
+                      <th className="py-3 px-4 text-center">Account</th>
+                      <th className="py-3 px-4 text-left">Reason</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {sortedTransactions.map((tx) => (
-                      <tr 
-                        key={tx.tx_id} 
-                        onClick={() => handleTxClick(tx)}
-                        className={getRowClass(tx)}
-                      >
-                        <td className="py-3.5 px-4 font-mono text-xs font-semibold text-slate-200">
-                          {role === "admin" ? tx.tx_id : "••••••••"}
-                        </td>
-                        <td className="py-3.5 px-4 text-center font-mono text-xs text-slate-400">
-                          {formatTime(tx.timestamp)}
-                        </td>
-                        <td className="py-3.5 px-4 text-center">
-                          <span className="text-[10px] font-mono font-semibold px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700/60 uppercase">
-                            {tx.channel}
-                          </span>
-                        </td>
-                        <td className="py-3.5 px-4">
-                          <div className="flex items-center gap-2 text-xs font-mono">
-                            <span className="text-sky-400 font-medium">
-                              {role === "admin" ? tx.sender_account : maskAccount(tx.sender_account)}
+                    {sortedTransactions.map((tx) => {
+                      const dec = tx.response_decision || {};
+                      const rec = tx.execution_record || {};
+                      const rawScore = Number(tx.risk_score || 0);
+
+                      let actionCode = tx.action || rec.action_code || dec.action;
+                      if (!actionCode) {
+                        actionCode = rawScore >= 85 ? 'FREEZE' : rawScore >= 70 ? 'ESCALATE_ANALYST_REVIEW' : rawScore >= 40 ? 'ENHANCED_MONITORING' : 'MONITOR';
+                      }
+                      const actionText = actionCode.replace(/_/g, ' ');
+
+                      const accountStatus = tx.account_status || rec.resulting_account_state || 'ACTIVE';
+                      const isFrozen = accountStatus === 'FROZEN';
+                      const isFreezeAction = actionCode === 'FREEZE';
+                      const isFreezing = freezingTxIds.has(tx.tx_id);
+                      const isHumanOperator = rec.actor_type === 'HUMAN_OPERATOR';
+
+                      let execStatusText = 'AUTOMATED';
+                      let isOperatorReq = false;
+
+                      if (isFreezeAction) {
+                        if (isFrozen || isHumanOperator) {
+                          execStatusText = 'EXECUTED BY HUMAN OPERATOR';
+                        } else {
+                          execStatusText = 'REQUIRES OPERATOR ACTION';
+                          isOperatorReq = true;
+                        }
+                      } else if (rec.execution_status === 'NOT_EXECUTED' || rec.automation_mode === 'AUTOMATE_OFF') {
+                        execStatusText = 'AUTOMATION OFF';
+                      } else if (rec.execution_status) {
+                        execStatusText = rec.execution_status;
+                      }
+
+                      return (
+                        <tr
+                          key={tx.tx_id}
+                          onClick={() => handleTxClick(tx)}
+                          className={getRowClass(tx)}
+                        >
+                          <td className="py-3.5 px-4 font-mono text-xs font-semibold text-slate-200">
+                            <div>{role === "admin" ? tx.tx_id : "••••••••"}</div>
+                            {tx.total_hops && tx.total_hops > 1 && (
+                              <div
+                                title={`Pattern: ${tx.pattern_type || 'MULTI-HOP'} | Chain: ${tx.chain_id} | Hop ${tx.hop_number || 1}/${tx.total_hops}`}
+                                className="inline-flex items-center gap-1 mt-1 px-1.5 py-0.5 rounded bg-amber-950/80 border border-amber-500/50 text-[9px] font-mono text-amber-300 font-bold"
+                              >
+                                <span>🔗 {tx.total_hops}-HOP CHAIN</span>
+                              </div>
+                            )}
+                          </td>
+
+                          <td className="py-3.5 px-4 text-center font-mono text-xs text-slate-400">
+                            {formatTime(tx.timestamp)}
+                          </td>
+                          <td className="py-3.5 px-4 text-center">
+                            <span className="text-[10px] font-mono font-semibold px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700/60 uppercase">
+                              {tx.channel}
                             </span>
-                            <ArrowRight className="w-3 h-3 text-slate-500 shrink-0" />
-                            <span className="text-sky-400 font-medium">
-                              {role === "admin" ? tx.receiver_account : maskAccount(tx.receiver_account)}
+                          </td>
+                          <td className="py-3.5 px-4">
+                            <div className="flex items-center gap-2 text-xs font-mono">
+                              <span className="text-sky-400 font-medium">
+                                {role === "admin" ? tx.sender_account : maskAccount(tx.sender_account)}
+                              </span>
+                              <ArrowRight className="w-3 h-3 text-slate-500 shrink-0" />
+                              <span className="text-sky-400 font-medium">
+                                {role === "admin" ? tx.receiver_account : maskAccount(tx.receiver_account)}
+                              </span>
+                            </div>
+                          </td>
+                          <td className="py-3.5 px-4 text-right font-mono text-sm font-semibold text-slate-100">
+                            ₹{tx.amount.toLocaleString()}
+                          </td>
+                          <td className="py-3.5 px-4 text-center">
+                            <RiskBadge score={tx.risk_score} />
+                          </td>
+                          <td className="py-3.5 px-4 text-center">
+                            <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-200 px-2 py-0.5 rounded bg-slate-800/80 border border-slate-700">
+                              {actionText}
                             </span>
-                          </div>
-                        </td>
-                        <td className="py-3.5 px-4 text-right font-mono text-sm font-semibold text-slate-100">
-                          ₹{tx.amount.toLocaleString()}
-                        </td>
-                        <td className="py-3.5 px-4 text-center">
-                          <RiskBadge score={tx.risk_score} />
-                        </td>
-                        <td className="py-3.5 px-4">
-                          {tx.reason ? (
-                            <span className="text-xs text-slate-300 truncate max-w-[260px] block font-medium">
-                              {tx.reason}
+                          </td>
+                          <td className="py-3.5 px-4 text-center">
+                            {isFreezeAction && !isFrozen ? (
+                              <div className="flex flex-col items-center gap-1">
+                                <span className="text-[9px] font-mono font-bold text-amber-400 uppercase tracking-wider">
+                                  ACTION REQUIRED
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={(e) => handleOpenFreezeModal(e, tx)}
+                                  disabled={isFreezing}
+                                  title="Operator approval required — account will be frozen."
+                                  className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-mono font-bold bg-rose-600 hover:bg-rose-500 active:bg-rose-700 text-white shadow-md shadow-rose-950/60 transition-all border border-rose-400/30 hover:border-rose-400/60 disabled:opacity-50 disabled:cursor-not-allowed select-none"
+                                >
+                                  <Lock className="w-3.5 h-3.5" />
+                                  <span>{isFreezing ? 'FREEZING...' : '🔒 Freeze'}</span>
+                                </button>
+                              </div>
+                            ) : rec.execution_status === 'SUCCESS' || rec.execution_status === 'EXECUTED' ? (
+                              <div className="flex flex-col items-center justify-center gap-0.5">
+                                <span
+                                  className={`text-[10px] font-mono font-extrabold px-2.5 py-0.5 rounded border uppercase ${
+                                    rec.actor_type === 'HUMAN_OPERATOR' || isHumanOperator
+                                      ? 'bg-purple-950/90 text-purple-300 border-purple-600/80'
+                                      : 'bg-emerald-950/90 text-emerald-300 border-emerald-600/80'
+                                  }`}
+                                >
+                                  ACTION TAKEN
+                                </span>
+                                <span className="text-[9px] font-mono text-slate-400 font-medium">
+                                  {rec.actor_type === 'HUMAN_OPERATOR' || isHumanOperator ? 'Human Operator' : '⚡ Automation Engine'}
+                                </span>
+                              </div>
+                            ) : (
+                              <div className="flex flex-col items-center gap-1">
+                                <span className="text-[9px] font-mono font-bold text-amber-400 uppercase tracking-wider">
+                                  ACTION REQUIRED
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={(e) => handleManualAction(e, tx, actionCode)}
+                                  disabled={executingActionTxIds.has(tx.tx_id)}
+                                  className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-mono font-bold text-white shadow-md transition-all select-none ${
+                                    actionCode === 'BLOCK' ? 'bg-rose-700 hover:bg-rose-600' :
+                                    actionCode === 'REJECT_TRANSACTION' ? 'bg-rose-800 hover:bg-rose-700' :
+                                    actionCode === 'FILE_STR' ? 'bg-purple-600 hover:bg-purple-500' :
+                                    actionCode === 'CLOSE_ACCOUNT' ? 'bg-rose-900 hover:bg-rose-800' :
+                                    actionCode === 'ESCALATE_ANALYST_REVIEW' ? 'bg-amber-600 hover:bg-amber-500' :
+                                    actionCode === 'ENHANCED_MONITORING' ? 'bg-sky-700 hover:bg-sky-600' :
+                                    actionCode === 'MARK_FALSE_POSITIVE' ? 'bg-slate-700 hover:bg-slate-600' :
+                                    'bg-sky-600 hover:bg-sky-500'
+                                  }`}
+                                >
+                                  <span>
+                                    {executingActionTxIds.has(tx.tx_id)
+                                      ? 'EXECUTING...'
+                                      : actionCode === 'ESCALATE_ANALYST_REVIEW'
+                                      ? 'Escalate'
+                                      : actionCode === 'ENHANCED_MONITORING'
+                                      ? 'Enhanced Monitoring'
+                                      : actionCode === 'MARK_FALSE_POSITIVE'
+                                      ? 'Mark False Positive'
+                                      : actionCode === 'REJECT_TRANSACTION'
+                                      ? 'Reject'
+                                      : actionCode === 'CLOSE_ACCOUNT'
+                                      ? 'Close Account'
+                                      : actionCode === 'BLOCK'
+                                      ? 'Block'
+                                      : actionCode === 'FILE_STR'
+                                      ? 'File STR'
+                                      : 'Monitor'}
+                                  </span>
+                                </button>
+                              </div>
+                            )}
+                          </td>
+
+
+
+                          <td className="py-3.5 px-4 text-center">
+                            <span
+                              className={`text-[10px] font-mono font-bold px-2.5 py-1 rounded uppercase flex items-center justify-center gap-1 mx-auto ${
+                                isFrozen
+                                  ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                                  : 'bg-slate-800 text-slate-300 border border-slate-700'
+                              }`}
+                            >
+                              {isFrozen && <Lock className="w-3 h-3 text-rose-400 shrink-0" />}
+                              {accountStatus}
                             </span>
-                          ) : (
-                            <span className="text-xs text-slate-600 italic">No flag triggers</span>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
+                          </td>
+                          <td className="py-3.5 px-4">
+                            {tx.reason ? (
+                              <span className="text-xs text-slate-300 truncate max-w-[200px] block font-medium">
+                                {tx.reason}
+                              </span>
+                            ) : (
+                              <span className="text-xs text-slate-600 italic">No flag triggers</span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
             </div>
+
           ) : (
             /* Professional Empty State */
             <div className="flex flex-col items-center justify-center p-16 border border-dashed border-border/80 rounded-2xl bg-card/40 text-center max-w-xl mx-auto my-12 shadow-xl">
@@ -223,6 +540,171 @@ const Feed = () => {
         </div>
       </div>
 
+      {/* Freeze Confirmation Modal */}
+      {freezeModalState.isOpen && freezeModalState.tx && (
+        <div className="fixed inset-0 z-[130] bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4 select-none animate-in fade-in duration-200">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-lg w-full p-6 shadow-2xl space-y-4 font-sans relative">
+            <button
+              onClick={handleCloseFreezeModal}
+              className="absolute top-4 right-4 text-slate-400 hover:text-slate-200 p-1 rounded-lg hover:bg-slate-800"
+            >
+              <X className="w-5 h-5" />
+            </button>
+
+            <div className="flex items-center gap-3 border-b border-slate-800 pb-3">
+              <div className="p-2.5 bg-rose-500/20 text-rose-400 rounded-xl border border-rose-500/30">
+                <Lock className="w-6 h-6 animate-pulse" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-100 font-mono uppercase tracking-wide">
+                  Confirm Account Freeze
+                </h3>
+                <p className="text-xs text-slate-400 font-sans">
+                  You are about to freeze this account.
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-3 text-xs text-slate-300">
+              <div className="bg-slate-950/80 p-3.5 rounded-xl border border-slate-800 space-y-2 font-mono text-[11px]">
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Transaction ID:</span>
+                  <span className="text-slate-100 font-bold">{freezeModalState.tx.tx_id}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Account ID:</span>
+                  <span className="text-sky-300 font-bold">{freezeModalState.tx.sender_account}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Risk Score:</span>
+                  <span className="text-rose-400 font-bold">{freezeModalState.tx.risk_score}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Risk Level:</span>
+                  <span className="text-rose-400 font-bold">
+                    {freezeModalState.tx.risk_score >= 85 ? 'CRITICAL' : 'HIGH'}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Policy Action:</span>
+                  <span className="text-rose-300 font-bold">FREEZE ACCOUNT</span>
+                </div>
+                <div className="pt-2 border-t border-slate-800">
+                  <span className="text-slate-400 block mb-1">Reason:</span>
+                  <span className="text-slate-300 font-sans text-xs">
+                    {freezeModalState.tx.reason || 'High-risk cross-border activity + velocity anomaly detected'}
+                  </span>
+                </div>
+              </div>
+
+              <div className="p-3 bg-amber-950/40 border border-amber-500/40 rounded-xl flex items-center gap-2.5 text-amber-200">
+                <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0" />
+                <span className="font-semibold text-[11px]">
+                  Warning: This action will restrict account activity.
+                </span>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={handleCloseFreezeModal}
+                className="px-4 py-2 rounded-xl text-xs font-mono font-semibold text-slate-400 hover:text-slate-200 hover:bg-slate-800 border border-slate-700"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmFreeze}
+                disabled={freezingTxIds.has(freezeModalState.tx.tx_id)}
+                className="px-5 py-2 rounded-xl text-xs font-mono font-bold bg-rose-600 hover:bg-rose-500 active:bg-rose-700 text-white shadow-lg shadow-rose-950/80 flex items-center gap-2"
+              >
+                <Lock className="w-4 h-4" />
+                <span>
+                  {freezingTxIds.has(freezeModalState.tx.tx_id) ? 'FREEZING...' : 'Confirm Freeze'}
+                </span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Consequential Action Confirmation Modal */}
+      {actionModalState.isOpen && actionModalState.tx && (
+        <div className="fixed inset-0 z-[130] bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4 select-none animate-in fade-in duration-200">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-lg w-full p-6 shadow-2xl space-y-4 font-sans relative">
+            <button
+              onClick={() => setActionModalState({ isOpen: false, tx: null, actionCode: '' })}
+              className="absolute top-4 right-4 text-slate-400 hover:text-slate-200 p-1 rounded-lg hover:bg-slate-800"
+            >
+              <X className="w-5 h-5" />
+            </button>
+
+            <div className="flex items-center gap-3 border-b border-slate-800 pb-3">
+              <div className="p-2.5 bg-amber-500/20 text-amber-400 rounded-xl border border-amber-500/30">
+                <AlertTriangle className="w-6 h-6 animate-pulse" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-100 font-mono uppercase tracking-wide">
+                  Confirm Manual Action
+                </h3>
+                <p className="text-xs text-slate-400 font-sans">
+                  Human Operator Authorization Required
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-3 text-xs text-slate-300">
+              <div className="bg-slate-950/80 p-3.5 rounded-xl border border-slate-800 space-y-2 font-mono text-[11px]">
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Action:</span>
+                  <span className="text-amber-400 font-bold uppercase">{actionModalState.actionCode.replace(/_/g, ' ')}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Transaction ID:</span>
+                  <span className="text-slate-100 font-bold">{actionModalState.tx.tx_id}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Account ID:</span>
+                  <span className="text-sky-300 font-bold">{actionModalState.tx.sender_account}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Risk Score:</span>
+                  <span className="text-rose-400 font-bold">{actionModalState.tx.risk_score}</span>
+                </div>
+                <div className="pt-2 border-t border-slate-800">
+                  <span className="text-slate-400 block mb-1">Policy Rationale:</span>
+                  <span className="text-slate-300 font-sans text-xs">
+                    {actionModalState.tx.reason || 'Consequential action required under deterministic policy rules.'}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() => setActionModalState({ isOpen: false, tx: null, actionCode: '' })}
+                className="px-4 py-2 rounded-xl text-xs font-mono font-semibold text-slate-400 hover:text-slate-200 hover:bg-slate-800 border border-slate-700"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => executeManualAction(actionModalState.tx, actionModalState.actionCode)}
+                disabled={executingActionTxIds.has(actionModalState.tx.tx_id)}
+                className="px-5 py-2 rounded-xl text-xs font-mono font-bold bg-amber-600 hover:bg-amber-500 active:bg-amber-700 text-white shadow-lg shadow-amber-950/80 flex items-center gap-2"
+              >
+                <span>
+                  {executingActionTxIds.has(actionModalState.tx.tx_id) ? 'EXECUTING...' : `Confirm ${actionModalState.actionCode.replace(/_/g, ' ')}`}
+                </span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+
       <InvestigationSidebar 
         isOpen={sidebarState.isOpen}
         selectedTransaction={sidebarState.tx}
@@ -231,9 +713,16 @@ const Feed = () => {
         onClose={() => setSidebarState({ ...sidebarState, isOpen: false })}
         role={role}
       />
+
+      <AutomationAuditDrawer
+        auditData={selectedAuditTx}
+        onClose={() => setSelectedAuditTx(null)}
+      />
     </div>
   );
 };
 
+
 export default Feed;
+
 

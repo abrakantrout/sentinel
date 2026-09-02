@@ -28,41 +28,49 @@ def process_scored_tx(tx: dict, score_output: dict, store: dict) -> dict:
     
     # FIX: Dynamic Node Capping (Random 2-5 for High Risk)
     if not case_id:
-        # Check if we should link to an existing case, respecting its specific max_nodes
-        existing_case = next((c for c in store["cases"].values() 
-                              if (c["origin_account"] == sender or sender in c["chain"] or receiver in c["chain"]) 
-                              and c["status"] in ["NEW", "HIGH_RISK"]
-                              and len(c["chain"]) < c.get("max_nodes", 5)), None)
-        
+        chain_id = tx.get("chain_id")
+        existing_case = None
+        if chain_id:
+            existing_case = next((c for c in store["cases"].values()
+                                  if isinstance(c, dict) and c.get("chain_id") == chain_id), None)
+        if not existing_case:
+            existing_case = next((c for c in store["cases"].values()
+                                  if isinstance(c, dict) and (c.get("origin_account") == sender or sender in c.get("chain", []) or receiver in c.get("chain", []))
+                                  and c.get("status") in ["NEW", "HIGH_RISK"]
+                                  and len(c.get("chain", [])) < c.get("max_nodes", 10)), None)
+
         if existing_case:
             case_id = existing_case["case_id"]
             tx["case_id"] = case_id
         else:
             case_id = f"CASE-{str(uuid.uuid4())[:8].upper()}"
             tx["case_id"] = case_id
-            
-            # Randomize limit between 3 and 6 nodes for variety
-            max_nodes = random.randint(3, 6)
-            store["cases"][case_id] = {
-                "case_id": case_id,
-                "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-                "status": "NEW",
-                "risk_level": score,
-                "primary_tx_id": tx.get("tx_id", ""), # Link to the starting transaction
-                "max_nodes": max_nodes,
-                "total_fraud_amount": 0.0,
-                "recoverable_amount": 0.0,
-                "golden_window_minutes": GOLDEN_WINDOW_MINUTES,
-                "origin_account": sender,
-                "chain": [sender],
-                "chain_depth": 0,
-                "urgency_score": 0.0,
-                "transactions": [],
-                "actions_taken": [],
-                "timeline": [_timeline_event("case_created")]
-            }
+
+    if case_id not in store["cases"]:
+        max_nodes = max(10, int(tx.get("total_hops", 5)) + 3)
+        store["cases"][case_id] = {
+            "case_id": case_id,
+            "chain_id": tx.get("chain_id"),
+            "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "status": "NEW",
+            "risk_level": score,
+            "primary_tx_id": tx.get("tx_id", ""),
+            "max_nodes": max_nodes,
+            "total_fraud_amount": 0.0,
+            "recoverable_amount": 0.0,
+            "golden_window_minutes": GOLDEN_WINDOW_MINUTES,
+            "origin_account": sender,
+            "chain": [sender],
+            "chain_depth": 0,
+            "urgency_score": 0.0,
+            "transactions": [],
+            "actions_taken": [],
+            "timeline": [_timeline_event("case_created")]
+        }
+
 
     case = store["cases"][case_id]
+
 
     tx_id = tx["tx_id"]
     if tx_id not in case["transactions"]:

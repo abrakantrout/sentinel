@@ -44,7 +44,16 @@ class AbstractCaseRepository(ABC):
         pass
 
     @abstractmethod
+    async def save_audit_event(self, audit_event_record: Dict[str, Any]) -> bool:
+        """
+        Appends an immutable audit event record to the audit log repository.
+        Exposes no mutation or deletion capabilities (append-only).
+        """
+        pass
+
+    @abstractmethod
     async def get_case_history(self, case_id: str) -> Dict[str, Any]:
+
         """
         Retrieves complete chronological disposition and audit log history for a given case.
         Returns dict containing:

@@ -142,9 +142,17 @@ class InMemoryCaseRepository(AbstractCaseRepository):
         return copy.deepcopy(rpt) if rpt else None
 
     async def get_investigation_reports_by_case_id(self, case_id: str) -> List[Dict[str, Any]]:
+
         rpts = [copy.deepcopy(r) for k, r in self._reports.items() if r.get("case_id") == case_id]
         rpts.sort(key=lambda x: (x.get("created_at", ""), x.get("report_id", "")))
         return rpts
+
+    async def save_audit_event(self, audit_event_record: Dict[str, Any]) -> bool:
+        if "audit_events" not in self._store:
+            self._store["audit_events"] = []
+        self._store["audit_events"].append(copy.deepcopy(audit_event_record))
+        return True
+
 
 
     async def get_account(self, account_id: str) -> Optional[Dict[str, Any]]:
