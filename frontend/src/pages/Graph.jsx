@@ -6,7 +6,7 @@ import ErrorBoundary from '../components/ErrorBoundary';
 
 const Graph = () => {
   const { caseId } = useParams();
-  const { cases, actions, connectionStatus } = useWebSocket();
+  const { cases, actions, connectionStatus, lastTxEvent } = useWebSocket();
   const [fetchedCase, setFetchedCase] = useState(null);
 
   useEffect(() => {
@@ -67,14 +67,28 @@ const Graph = () => {
   }, [caseId]);
 
   if (!activeCase && cases.length === 0 && connectionStatus === 'LIVE') {
-    return <div className="p-6 text-sm text-muted-foreground">Loading case graph...</div>;
+    return (
+      <div className="flex items-center justify-center h-full p-8 text-slate-400 font-mono text-xs">
+        Loading case graph...
+      </div>
+    );
   }
 
   if (connectionStatus === 'OFFLINE' && !activeCase) {
-    return <div className="p-6 text-sm text-red-500">Graph unavailable while offline.</div>;
+    return (
+      <div className="flex items-center justify-center h-full p-8 text-rose-400 font-mono text-xs">
+        Graph unavailable while offline.
+      </div>
+    );
   }
 
-  if (!activeCase) return null;
+  if (!activeCase) {
+    return (
+      <div className="flex items-center justify-center h-full p-8 text-slate-400 font-mono text-xs">
+        No case selected or case not found.
+      </div>
+    );
+  }
 
   return (
     <ErrorBoundary>
@@ -84,12 +98,11 @@ const Graph = () => {
           actions={actions}
           onAction={handleAction}
           connectionStatus={connectionStatus}
-          newTransactionEvent={useWebSocket().lastTxEvent}
+          newTransactionEvent={lastTxEvent}
         />
       </div>
     </ErrorBoundary>
   );
-
 };
 
 export default Graph;

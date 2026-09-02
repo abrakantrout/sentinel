@@ -77,7 +77,6 @@ const TransactionDetailModal = ({ edge, onClose, isAutomationOn = true, onAction
       setFreezeLoading(false);
     }
   };
-  const timestamp = edge.timestamp || new Date().toISOString();
 
   // Deduce 3-5 high value key risk signals
   const signals = [];

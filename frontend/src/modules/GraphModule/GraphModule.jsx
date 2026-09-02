@@ -298,14 +298,12 @@ const GraphModule = ({ caseData, actions = [], onAction, connectionStatus, newTr
     return () => clearTimeout(t);
   }, [newTransactionEvent]);
 
-  if (!caseData) return null;
-
-  const rawNodes = useMemo(() => Array.isArray(caseData.nodes) ? caseData.nodes : [], [caseData.nodes]);
-  const rawEdges = useMemo(() => Array.isArray(caseData.edges) ? caseData.edges : [], [caseData.edges]);
-  const rawTopo = caseData.topology_type || 'MULTI_HOP_DAG';
+  const rawNodes = useMemo(() => Array.isArray(caseData?.nodes) ? caseData.nodes : [], [caseData?.nodes]);
+  const rawEdges = useMemo(() => Array.isArray(caseData?.edges) ? caseData.edges : [], [caseData?.edges]);
+  const rawTopo = caseData?.topology_type || 'MULTI_HOP_DAG';
   const humanTopology = TOPOLOGY_LABELS[rawTopo] || rawTopo.replace(/_/g, ' ');
-  const caseId = caseData.case_id || 'CASE-ATTACK-001';
-  const primaryTx = caseData.primary_tx_id || (rawEdges[0] ? (rawEdges[0].tx_id || rawEdges[0].id) : 'TX-001');
+  const caseId = caseData?.case_id || 'CASE-ATTACK-001';
+  const primaryTx = caseData?.primary_tx_id || (rawEdges[0] ? (rawEdges[0].tx_id || rawEdges[0].id) : 'TX-001');
 
   const metrics = useMemo(() => {
     const totalNodes = rawNodes.length;
@@ -346,6 +344,14 @@ const GraphModule = ({ caseData, actions = [], onAction, connectionStatus, newTr
       () => { setIsTracing(false); setTraceProgress(null); }
     );
   };
+
+  if (!caseData) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full p-8 text-center bg-[#020617] text-slate-400 font-mono text-xs">
+        LOADING INVESTIGATION GRAPH...
+      </div>
+    );
+  }
 
   return (
     <div

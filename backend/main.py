@@ -1135,13 +1135,36 @@ def _sanitize_csv_field(val: Any) -> str:
     return s
 
 
+ACTION_DISPLAY_MAP = {
+    "FREEZE": "Freeze Account",
+    "BLOCK": "Block Account",
+    "REJECT_TRANSACTION": "Reject Transaction",
+    "CLOSE_ACCOUNT": "Close Account",
+    "FILE_STR": "File STR",
+    "MONITOR": "Monitor",
+    "ENHANCED_MONITORING": "Enhanced Monitoring",
+    "ESCALATE_ANALYST_REVIEW": "Escalate Analyst Review",
+    "MARK_FALSE_POSITIVE": "Mark False Positive",
+    "FLAG": "Flag Case",
+    "ALERT": "Trigger Alert"
+}
+
+def _fmt_label(val: Any) -> str:
+    if not val:
+        return ""
+    v_str = str(val)
+    if v_str.upper() in ACTION_DISPLAY_MAP:
+        return ACTION_DISPLAY_MAP[v_str.upper()]
+    return v_str.replace("_", " ").title()
+
+
 @app.get("/export/sentinel_audit.csv")
 async def export_csv(
     repo: AbstractCaseRepository = Depends(get_repository)
 ):
     """
-    Generates and streams a CSV audit log from authoritative repository store.
-    Includes all transactions and investigative actions.
+    Generates and streams a comprehensive CSV audit log from authoritative repository store.
+    Exports complete action audit history (automatic & manual) with 16 canonical fields.
     Browser handles this as a native file download.
     """
     from fastapi.responses import StreamingResponse
@@ -1154,8 +1177,146 @@ async def export_csv(
 
     writer = csv.writer(output, lineterminator='\r\n')
 
-    # ── Section 1: Transactions ───────────────────────────────────────────────
-    writer.writerow(['SENTINEL AUDIT LOG - TRANSACTION FEED'])
+    # ── Section 1: Complete Action Audit Log ────────────────────────────────────
+    writer.writerow(['SENTINEL COMPLETE ACTION AUDIT LOG'])
+    writer.writerow([
+        'Timestamp', 'Audit ID', 'Case ID', 'Transaction ID',
+        'Account ID', 'Risk Score', 'Risk Level', 'Action',
+        'Execution Mode', 'Actor', 'Action Status',
+        'Previous State', 'Resulting State', 'Reason',
+        'Policy Rule ID', 'Operator / Analyst ID'
+    ])
+
+    # Fetch all authoritative audit events across all data sources
+    audit_events = await repo.get_all_audit_events()
+    ds_audits = data_store.get("audit_events", [])
+    exec_actions = list(data_store.get("executed_actions", {}).values())
+
+    combined_map = {}
+    
+    # Process repo audit_events
+    for a in audit_events:
+        aid = a.get("audit_id") or a.get("execution_id") or f"AUD-{uuid4().hex[:8]}"
+        combined_map[aid] = a
+
+    # Process in-memory audit_events
+    for a in ds_audits:
+        aid = a.get("audit_id") or a.get("execution_id") or f"AUD-{uuid4().hex[:8]}"
+        if aid not in combined_map:
+            combined_map[aid] = a
+
+    # Process executed_actions dictionary
+    for ea in exec_actions:
+        aid = ea.get("execution_id") or ea.get("idempotency_key")
+        if aid and aid not in combined_map:
+            combined_map[aid] = {
+                "audit_id": ea.get("execution_id", f"EXEC-{uuid4().hex[:8]}"),
+                "timestamp": ea.get("timestamp", _now_iso()),
+                "case_id": ea.get("case_id", ""),
+                "primary_tx_id": ea.get("transaction_id", ""),
+                "target_account": ea.get("account_id", ""),
+                "risk_score": ea.get("risk_score", 0),
+                "risk_level": ea.get("risk_level", "LOW"),
+                "action_code": ea.get("action_code", "MONITOR"),
+                "actor_type": ea.get("actor_type", "AUTOMATION_ENGINE"),
+                "analyst_id": ea.get("actor_id", "SENTINEL_SIMULATED_EXECUTOR"),
+                "execution_status": ea.get("execution_status", "SUCCESS"),
+                "previous_case_status": ea.get("previous_account_state", "ACTIVE"),
+                "new_case_status": ea.get("resulting_account_state", "ACTIONED"),
+                "reason": ea.get("reason", "Autonomous policy decision"),
+                "policy_rule_id": ea.get("policy_rule_id", "POL-DEFAULT")
+            }
+
+    # Fetch case disposition history
+    cases = await repo.get_cases()
+    for c in cases:
+        c_hist = await repo.get_case_history(c.get("case_id", ""))
+        c_actions = c_hist.get("disposition_history", []) if isinstance(c_hist, dict) else []
+        for ca in c_actions:
+            aid = ca.get("disposition_id") or ca.get("action_id")
+            if aid and aid not in combined_map:
+                combined_map[aid] = {
+                    "audit_id": aid,
+                    "timestamp": ca.get("disposition_timestamp") or ca.get("timestamp", _now_iso()),
+                    "case_id": ca.get("case_id", c.get("case_id", "")),
+                    "primary_tx_id": c.get("primary_tx_id", ""),
+                    "target_account": ca.get("target", "GLOBAL"),
+                    "risk_score": c.get("risk_score", 0),
+                    "risk_level": c.get("risk_level", "LOW"),
+                    "action_code": ca.get("action_code") or ca.get("action_type", "MONITOR"),
+                    "actor_type": ca.get("actor_type", "HUMAN_OPERATOR"),
+                    "analyst_id": ca.get("analyst_id", "OPERATOR_ADMIN"),
+                    "execution_status": ca.get("status", "SUCCESS"),
+                    "previous_case_status": "ACTIVE",
+                    "new_case_status": ca.get("new_case_status", "ACTIONED"),
+                    "reason": ca.get("analyst_notes") or ca.get("reason", "Analyst disposition action"),
+                    "policy_rule_id": "POL-OPERATOR-DISPOSITION"
+                }
+
+    tx_store = data_store.get("transactions", {})
+
+    for aid, a in combined_map.items():
+        # Traceability chain fallback
+        tc = a.get("traceability_chain") or a.get("decision_support_summary") or {}
+        
+        tx_id = a.get("primary_tx_id") or a.get("transaction_id") or tc.get("transaction_id") or ""
+        tx_obj = tx_store.get(tx_id, {})
+
+        score = float(a.get("risk_score") or tc.get("risk_score") or tx_obj.get("risk_score", 0))
+        r_level_raw = a.get("risk_level") or tc.get("risk_level") or tx_obj.get("risk_level", "")
+        if not r_level_raw:
+            r_level_raw = "HIGH_RISK" if score >= 70 else "MEDIUM" if score >= 40 else "LOW"
+        risk_level_disp = _fmt_label(r_level_raw)
+
+        action_code = a.get("action_code") or a.get("action_type") or tc.get("action_code") or "MONITOR"
+        action_disp = _fmt_label(action_code)
+
+        actor_type_raw = a.get("actor_type") or tc.get("actor_type") or a.get("analyst_role") or ""
+        is_manual = actor_type_raw in ("HUMAN_OPERATOR", "OPERATOR", "Human Operator")
+        exec_mode = "Manual" if is_manual else "Automatic"
+        actor_disp = "Human Operator" if is_manual else "Automation Engine"
+
+        exec_stat_raw = a.get("execution_status") or a.get("status") or tc.get("execution_status") or "SUCCESS"
+        if exec_stat_raw in ("SUCCESS", "EXECUTED", "ACK"):
+            status_disp = "Executed"
+        elif exec_stat_raw in ("REJECTED", "POLICY_BLOCKED"):
+            status_disp = "Blocked"
+        elif exec_stat_raw == "FAILED":
+            status_disp = "Failed"
+        elif exec_stat_raw == "REQUIRES_OPERATOR_ACTION":
+            status_disp = "Requires Operator Action"
+        else:
+            status_disp = _fmt_label(exec_stat_raw)
+
+        prev_state = _fmt_label(a.get("previous_case_status") or tc.get("previous_account_state") or "Active")
+        new_state = _fmt_label(a.get("new_case_status") or tc.get("resulting_account_state") or "Actioned")
+
+        reason = a.get("reason") or tc.get("reason") or a.get("analyst_notes") or "Autonomous policy execution"
+        rule_id = a.get("policy_rule_id") or tc.get("policy_rule_id") or "POL-DEFAULT"
+        operator_id = a.get("analyst_id") or tc.get("actor_id") or a.get("operator_id") or ("OPERATOR_ADMIN" if is_manual else "SENTINEL_SIMULATED_EXECUTOR")
+
+        writer.writerow([
+            _sanitize_csv_field(a.get("timestamp") or tc.get("timestamp") or _now_iso()),
+            _sanitize_csv_field(aid),
+            _sanitize_csv_field(a.get("case_id") or tc.get("case_id") or ""),
+            _sanitize_csv_field(tx_id),
+            _sanitize_csv_field(a.get("target_account") or a.get("account_id") or tc.get("account_id") or "ACC-GLOBAL"),
+            score,
+            risk_level_disp,
+            action_disp,
+            exec_mode,
+            actor_disp,
+            status_disp,
+            prev_state,
+            new_state,
+            _sanitize_csv_field(reason),
+            _sanitize_csv_field(rule_id),
+            _sanitize_csv_field(operator_id)
+        ])
+
+    # ── Section 2: Transaction Feed Audit ──────────────────────────────────────
+    writer.writerow([])
+    writer.writerow(['SENTINEL TRANSACTION FEED AUDIT'])
     writer.writerow([
         'Tx ID', 'Timestamp', 'Channel',
         'Sender Account', 'Receiver Account',
@@ -1165,7 +1326,7 @@ async def export_csv(
     tx_list = await repo.get_all_transactions()
     for tx in tx_list:
         score = float(tx.get("risk_score", 0))
-        level = "HIGH_RISK" if score >= 70 else "MEDIUM" if score >= 40 else "LOW"
+        level = "High Risk" if score >= 70 else "Medium Risk" if score >= 40 else "Low Risk"
         writer.writerow([
             _sanitize_csv_field(tx.get("tx_id", "")),
             _sanitize_csv_field(tx.get("timestamp", "")),
@@ -1178,41 +1339,9 @@ async def export_csv(
             _sanitize_csv_field(tx.get("case_id", ""))
         ])
 
-    # ── Section 2: Investigative Actions ─────────────────────────────────────
-    all_actions = []
-    cases = await repo.get_cases()
-    for c in cases:
-        c_hist = await repo.get_case_history(c.get("case_id", ""))
-        c_actions = c_hist.get("disposition_history", []) if isinstance(c_hist, dict) else []
-        all_actions.extend(c_actions)
-
-
-    if not all_actions:
-        audit_events = await repo.get_all_audit_events()
-        all_actions = audit_events
-
-    if all_actions:
-        writer.writerow([])
-        writer.writerow(['INVESTIGATIVE ACTIONS'])
-        writer.writerow([
-            'Action ID', 'Case ID', 'Action Type',
-            'Target Account', 'Status', 'Reason', 'Latency (ms)', 'Timestamp'
-        ])
-        for a in all_actions:
-            writer.writerow([
-                _sanitize_csv_field(a.get("disposition_id") or a.get("audit_id") or a.get("action_id", "")),
-                _sanitize_csv_field(a.get("case_id", "")),
-                _sanitize_csv_field(a.get("action_code") or a.get("event_type") or a.get("action_type", "")),
-                _sanitize_csv_field(a.get("target") or a.get("analyst_id") or "GLOBAL"),
-                _sanitize_csv_field(a.get("new_case_status") or a.get("status", "ACK")),
-                _sanitize_csv_field(a.get("analyst_notes") or a.get("reason", "System Action")),
-                a.get("latency", 0),
-                _sanitize_csv_field(a.get("disposition_timestamp") or a.get("timestamp", ""))
-            ])
-
     output.seek(0)
-    ts = datetime.now(_tz.utc).strftime("%Y%m%d_%H%M%S")
-    filename = f"sentinel_audit_{ts}.csv"
+    now = datetime.now(_tz.utc)
+    filename = f"SENTINEL_Audit_Log_{now.strftime('%Y-%m-%d_%H-%M')}.csv"
 
     return StreamingResponse(
         iter([output.getvalue()]),

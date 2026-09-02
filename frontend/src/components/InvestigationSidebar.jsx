@@ -15,7 +15,6 @@ const InvestigationSidebar = ({
   role,
   isAutomationOn = true
 }) => {
-  if (!isOpen) return null;
   const isViewer = role !== 'admin';
   const [expandedPhase, setExpandedPhase] = useState(null);
   const [investigationReadModel, setInvestigationReadModel] = useState(null);
@@ -33,6 +32,7 @@ const InvestigationSidebar = ({
   }, [selectedCase?.status, selectedTransaction?.status]);
 
   React.useEffect(() => {
+    if (!isOpen) return;
     const targetId = selectedCase?.case_id || selectedTransaction?.case_id;
     if (!targetId) return;
     const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
@@ -73,7 +73,9 @@ const InvestigationSidebar = ({
       .finally(() => setPhase1Loading(false));
 
     return () => clearInterval(interval);
-  }, [selectedCase?.case_id, selectedTransaction?.case_id]);
+  }, [isOpen, selectedCase?.case_id, selectedTransaction?.case_id]);
+
+  if (!isOpen) return null;
 
   const caseId = selectedCase?.case_id || selectedTransaction?.case_id || selectedTransaction?.tx_id || 'CASE-ATTACK-001';
   const riskScore = Number(selectedCase?.risk_level || selectedTransaction?.risk_score || 91);

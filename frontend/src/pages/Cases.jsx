@@ -2,10 +2,34 @@ import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useWebSocket } from '../hooks/useWebSocket';
 import RiskBadge from '../components/RiskBadge';
-import ActionButton from '../components/ActionButton';
 import InvestigationSidebar from '../components/InvestigationSidebar';
 import { getRole } from '../roleStore';
-import { Briefcase, Download, Filter, Network, Search } from 'lucide-react';
+import { Briefcase, Download, Filter, Network } from 'lucide-react';
+
+const FORMATTED_STATUS_MAP = {
+  'HIGH_RISK': 'High Risk',
+  'CLOSED_FP': 'Closed — False Positive',
+  'CLOSED_FALSE_POSITIVE': 'Closed — False Positive',
+  'CLOSED_CONFIRMED_FRAUD': 'Closed — Confirmed Fraud',
+  'ENHANCED_MONITORING': 'Enhanced Monitoring',
+  'REJECT_TRANSACTION': 'Reject Transaction',
+  'AUTOMATION_ENGINE': 'Automation Engine',
+  'HUMAN_OPERATOR': 'Human Operator',
+  'DO_NOT_EXECUTE': 'Do Not Execute',
+  'POLICY_BLOCKED': 'Policy Blocked',
+  'MONITORING': 'Monitoring',
+  'ACTIONED': 'Actioned',
+  'CLOSED': 'Closed',
+  'NEW': 'New',
+  'FROZEN': 'Frozen',
+  'BLOCKED': 'Blocked',
+};
+
+const formatStatusLabel = (val) => {
+  if (!val) return '';
+  if (FORMATTED_STATUS_MAP[val]) return FORMATTED_STATUS_MAP[val];
+  return String(val).replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+};
 
 const Cases = () => {
   const navigate = useNavigate();
@@ -14,16 +38,48 @@ const Cases = () => {
   const [sidebarState, setSidebarState] = useState({ isOpen: false, case: null, tx: null, actions: [] });
   const role = getRole();
 
-  const ALL_STATUSES = ['ALL', 'NEW', 'HIGH_RISK', 'ACTIONED', 'MONITORING', 'CLOSED', 'CLOSED_FP'];
+  const QUEUE_FILTERS = ['ALL', 'NEW', 'HIGH RISK', 'ACTIONED', 'CLOSED'];
 
-  const filteredCases = filter === 'ALL' 
-    ? cases 
-    : cases.filter(c => c.status === filter);
+  const filteredCases = cases.filter(c => {
+    if (filter === 'ALL') return true;
+    if (filter === 'NEW') return c.status === 'NEW';
+    if (filter === 'HIGH RISK') return c.status === 'HIGH_RISK' || c.risk_score >= 70 || c.risk_level === 'HIGH_RISK' || c.risk_level === 'HIGH' || c.risk_level === 'CRITICAL';
+    if (filter === 'ACTIONED') return c.status === 'ACTIONED' || c.status === 'MONITORING' || c.status === 'ENHANCED_MONITORING' || c.status === 'FROZEN' || c.status === 'BLOCKED';
+    if (filter === 'CLOSED') return c.status === 'CLOSED' || c.status === 'CLOSED_FP' || c.status === 'CLOSED_CONFIRMED_FRAUD' || c.status === 'CLOSED_FALSE_POSITIVE';
+    return true;
+  });
 
   const handleRowClick = (c) => {
     const relatedTx = transactions.find(t => t.case_id === c.case_id);
     const relatedActions = actions.filter(a => a.case_id === c.case_id);
     setSidebarState({ isOpen: true, case: c, tx: relatedTx, actions: relatedActions });
+  };
+
+  const handleExportAuditLog = async () => {
+    try {
+      const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
+      const res = await fetch(`${API_BASE}/export/sentinel_audit.csv`);
+      if (!res.ok) {
+        console.error(`Audit export failed: HTTP ${res.status}`);
+        return;
+      }
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const now = new Date();
+      const pad = (n) => String(n).padStart(2, '0');
+      const dateStr = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}_${pad(now.getHours())}-${pad(now.getMinutes())}`;
+      const filename = `SENTINEL_Audit_Log_${dateStr}.csv`;
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', filename);
+      link.style.display = 'none';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('Audit export network error:', err);
+    }
   };
 
   return (
@@ -36,12 +92,12 @@ const Cases = () => {
               <Briefcase className="w-6 h-6 text-sky-400" />
               Case Management Queue
             </h1>
-            <p className="text-xs text-slate-400 mt-1">Investigation workflows, status tracking, and audit logging</p>
+            <p className="text-xs text-slate-400 mt-1">Investigation workflows, status tracking, and authoritative audit logging</p>
           </div>
           
           <div className="flex items-center gap-3">
             <button
-              onClick={() => { window.location.href = 'http://127.0.0.1:8000/export/sentinel_audit.csv'; }}
+              onClick={handleExportAuditLog}
               disabled={role !== "admin"}
               className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition-all border ${
                 role === "admin"
@@ -61,13 +117,13 @@ const Cases = () => {
             <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400 px-3 flex items-center gap-1">
               <Filter className="w-3.5 h-3.5" /> Filter:
             </span>
-            {ALL_STATUSES.map(f => (
+            {QUEUE_FILTERS.map(f => (
               <button
                 key={f}
                 onClick={() => setFilter(f)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-mono font-medium transition-all ${
+                className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold tracking-wide transition-all ${
                   filter === f 
-                    ? 'bg-primary text-white font-semibold shadow-sm' 
+                    ? 'bg-primary text-white shadow-sm' 
                     : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/40'
                 }`}
               >
@@ -76,7 +132,7 @@ const Cases = () => {
             ))}
           </div>
           <span className="text-xs font-mono text-slate-400 px-3 whitespace-nowrap">
-            {filteredCases.length} cases
+            {filteredCases.length} {filteredCases.length === 1 ? 'case' : 'cases'}
           </span>
         </div>
 
@@ -109,22 +165,22 @@ const Cases = () => {
                       {role === "admin" ? (c.primary_tx_id || 'N/A') : '••••••••'}
                     </td>
                     <td className="py-3.5 px-4">
-                      <span className={`text-[10px] font-mono font-semibold px-2 py-0.5 rounded border uppercase ${
+                      <span className={`text-[11px] font-medium px-2.5 py-0.5 rounded border ${
                         c.status === 'HIGH_RISK' 
                           ? 'bg-rose-500/15 text-rose-400 border-rose-500/30' 
                           : 'bg-slate-800 text-slate-300 border-slate-700/60'
                       }`}>
-                        {c.status}
+                        {formatStatusLabel(c.status)}
                       </span>
                     </td>
                     <td className="py-3.5 px-4 text-center">
                       <RiskBadge score={c.risk_level} />
                     </td>
                     <td className="py-3.5 px-4 text-right font-mono text-sm font-semibold text-slate-100">
-                      ₹{c.total_fraud_amount.toLocaleString()}
+                      ₹{(c.total_fraud_amount || 0).toLocaleString()}
                     </td>
                     <td className="py-3.5 px-4 text-right font-mono text-sm font-semibold text-emerald-400">
-                      ₹{c.recoverable_amount.toLocaleString()}
+                      ₹{(c.recoverable_amount || 0).toLocaleString()}
                     </td>
                     <td className="py-3.5 px-4 text-center">
                       <div className="flex justify-center items-center gap-2">
