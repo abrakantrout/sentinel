@@ -1,11 +1,10 @@
-import React from 'react';
+import React, { useState } from 'react';
 import RiskBadge from './RiskBadge';
 import GoldenTimer from './GoldenTimer';
-import FactorBreakdown from './FactorBreakdown';
-import ActionButton from './ActionButton';
 import { maskAccount } from '../utils/maskAccount';
 import { twMerge } from 'tailwind-merge';
-import { X, ShieldAlert, Cpu, ArrowRight, Clock, Activity, Lock, Eye, AlertTriangle, ShieldCheck, CheckCircle2, FileText, BookOpen } from 'lucide-react';
+import { X, ShieldAlert, Activity, ArrowRight, Clock, Lock, CheckCircle2, AlertTriangle, GitCommit, FileText, ChevronRight, ChevronDown, Zap } from 'lucide-react';
+import AnalystEvidenceViewer from './AnalystEvidenceViewer';
 
 const InvestigationSidebar = ({ 
   isOpen, 
@@ -13,1084 +12,468 @@ const InvestigationSidebar = ({
   selectedTransaction, 
   actions = [], 
   onClose,
-  role
+  role,
+  isAutomationOn = true
 }) => {
   if (!isOpen) return null;
   const isViewer = role !== 'admin';
-  const [evidencePackage, setEvidencePackage] = React.useState(null);
-  const [contextualReport, setContextualReport] = React.useState(null);
-  const [regulatoryReport, setRegulatoryReport] = React.useState(null);
-  const [auditExplanation, setAuditExplanation] = React.useState(null);
-  const [decisionSupport, setDecisionSupport] = React.useState(null);
-  const [selectedDispositionCode, setSelectedDispositionCode] = React.useState('');
-  const [analystNotes, setAnalystNotes] = React.useState('');
-  const [riskAcknowledged, setRiskAcknowledged] = React.useState(false);
-  const [dispositionResponse, setDispositionResponse] = React.useState(null);
-  const [isSubmittingDisposition, setIsSubmittingDisposition] = React.useState(false);
-  const [caseHistory, setCaseHistory] = React.useState(null);
-  const [investigationReadModel, setInvestigationReadModel] = React.useState(null);
+  const [expandedPhase, setExpandedPhase] = useState(null);
+  const [investigationReadModel, setInvestigationReadModel] = useState(null);
+  const [phase1Evidence, setPhase1Evidence] = useState(null);
+  const [phase1Loading, setPhase1Loading] = useState(false);
 
-  const fetchCaseHistory = React.useCallback((caseId) => {
-    if (!caseId) {
-      setCaseHistory(null);
-      return;
+  const [isAccountFrozen, setIsAccountFrozen] = useState(selectedCase?.status === 'FROZEN' || selectedTransaction?.status === 'FROZEN');
+  const [freezeError, setFreezeError] = useState(null);
+  const [freezeLoading, setFreezeLoading] = useState(false);
+
+  React.useEffect(() => {
+    if (selectedCase?.status === 'FROZEN' || selectedTransaction?.status === 'FROZEN') {
+      setIsAccountFrozen(true);
     }
+  }, [selectedCase?.status, selectedTransaction?.status]);
+
+  React.useEffect(() => {
+    const targetId = selectedCase?.case_id || selectedTransaction?.case_id;
+    if (!targetId) return;
     const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
-    fetch(`${API_BASE}/cases/${caseId}/history`)
+
+    // Trigger or attach to backend investigation run
+    fetch(`${API_BASE}/cases/${targetId}/investigate?force_rerun=false`, { method: 'POST' })
       .then(res => res.ok ? res.json() : null)
-      .then(data => { if (data && data.found) setCaseHistory(data); })
+      .then(run => {
+        if (run) {
+          fetch(`${API_BASE}/cases/${targetId}/investigation`)
+            .then(r => r.ok ? r.json() : null)
+            .then(d => { if (d) setInvestigationReadModel(d); })
+            .catch(() => {});
+        }
+      })
       .catch(() => {});
-  }, []);
 
-  React.useEffect(() => {
-    if (selectedCase?.case_id) {
-      fetchCaseHistory(selectedCase.case_id);
-    } else {
-      setCaseHistory(null);
-    }
-  }, [selectedCase?.case_id, fetchCaseHistory]);
-
-
-  const [showConfirmModal, setShowConfirmModal] = React.useState(false);
-  const [historicalRuns, setHistoricalRuns] = React.useState([]);
-  const [selectedRunId, setSelectedRunId] = React.useState(null);
-
-  React.useEffect(() => {
-    if (selectedCase?.case_id) {
-      const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
-      fetch(`${API_BASE}/cases/${selectedCase.case_id}/investigation-runs`)
-        .then(res => res.ok ? res.json() : [])
-        .then(runs => setHistoricalRuns(runs || []))
-        .catch(() => setHistoricalRuns([]));
-
-      fetch(`${API_BASE}/cases/${selectedCase.case_id}/investigation`)
+    // Polling interval while investigation stages run
+    const interval = setInterval(() => {
+      fetch(`${API_BASE}/cases/${targetId}/investigation`)
         .then(res => res.ok ? res.json() : null)
         .then(data => {
           if (data) {
             setInvestigationReadModel(data);
-            if (data.stages) {
-
-              const ev = data.stages.find(s => s.stage === 'EVIDENCE')?.output;
-              if (ev) setEvidencePackage(ev);
-              const ctx = data.stages.find(s => s.stage === 'CONTEXTUAL')?.output;
-              if (ctx) setContextualReport(ctx);
-              const reg = data.stages.find(s => s.stage === 'REGULATORY')?.output;
-              if (reg) setRegulatoryReport(reg);
-              const aud = data.stages.find(s => s.stage === 'AUDIT_EXPLANATION')?.output;
-              if (aud) setAuditExplanation(aud);
-              const ds = data.stages.find(s => s.stage === 'DECISION_SUPPORT')?.output;
-              if (ds) setDecisionSupport(ds);
-            }
+            const stages = data.stages || [];
+            const allFinished = stages.length > 0 && stages.every(s => s.status === 'COMPLETED' || s.status === 'FAILED' || s.status === 'SKIPPED');
+            if (allFinished) clearInterval(interval);
           }
         })
         .catch(() => {});
-    } else {
-      setInvestigationReadModel(null);
-    }
+    }, 2000);
 
-    if (selectedCase?.evidence_package) {
-      setEvidencePackage(selectedCase.evidence_package);
-    } else if (selectedCase?.case_id) {
-      const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
-      fetch(`${API_BASE}/cases/${selectedCase.case_id}/evidence`)
-        .then(res => res.ok ? res.json() : null)
-        .then(data => { if (data && data.found) setEvidencePackage(data); })
-        .catch(() => {});
-    } else if (selectedTransaction?.tx_id) {
-      const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
-      fetch(`${API_BASE}/transactions/${selectedTransaction.tx_id}/evidence`)
-        .then(res => res.ok ? res.json() : null)
-        .then(data => { if (data && data.found) setEvidencePackage(data); })
-        .catch(() => {});
-    }
+    setPhase1Loading(true);
+    fetch(`${API_BASE}/cases/${targetId}/evidence`)
+      .then(res => res.ok ? res.json() : null)
+      .then(data => { if (data) setPhase1Evidence(data); })
+      .catch(() => {})
+      .finally(() => setPhase1Loading(false));
 
-    if (selectedCase?.contextual_investigation) {
-      setContextualReport(selectedCase.contextual_investigation);
-    } else if (selectedTransaction?.tx_id) {
-      const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
-      fetch(`${API_BASE}/transactions/${selectedTransaction.tx_id}/investigation`)
-        .then(res => res.ok ? res.json() : null)
-        .then(data => { if (data && data.found) setContextualReport(data); })
-        .catch(() => {});
-    }
+    return () => clearInterval(interval);
+  }, [selectedCase?.case_id, selectedTransaction?.case_id]);
 
-    if (selectedCase?.regulatory_assessment) {
-      setRegulatoryReport(selectedCase.regulatory_assessment);
-    } else if (selectedTransaction?.tx_id) {
-      const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
-      fetch(`${API_BASE}/transactions/${selectedTransaction.tx_id}/regulatory-assessment`)
-        .then(res => res.ok ? res.json() : null)
-        .then(data => { if (data && data.found) setRegulatoryReport(data); })
-        .catch(() => {});
-    }
+  const caseId = selectedCase?.case_id || selectedTransaction?.case_id || selectedTransaction?.tx_id || 'CASE-ATTACK-001';
+  const riskScore = Number(selectedCase?.risk_level || selectedTransaction?.risk_score || 91);
+  const totalFraud = selectedCase?.total_fraud_amount || selectedTransaction?.amount || 120000;
+  const recoverable = selectedCase?.recoverable_amount || Math.round(totalFraud * 0.8);
+  const status = isAccountFrozen ? 'FROZEN' : (selectedCase?.status || 'HIGH_RISK');
+  const isSuspicious = riskScore >= 60 || status === 'HIGH_RISK' || isAccountFrozen;
 
-    if (selectedCase?.audit_explanation) {
-      setAuditExplanation(selectedCase.audit_explanation);
-    } else if (selectedTransaction?.tx_id) {
-      const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
-      fetch(`${API_BASE}/transactions/${selectedTransaction.tx_id}/audit-explanation`)
-        .then(res => res.ok ? res.json() : null)
-        .then(data => { if (data && data.found) setAuditExplanation(data); })
-        .catch(() => {});
-    }
-
-    if (selectedCase?.analyst_decision_support) {
-      setDecisionSupport(selectedCase.analyst_decision_support);
-    } else if (selectedTransaction?.tx_id) {
-      const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
-      fetch(`${API_BASE}/transactions/${selectedTransaction.tx_id}/decision-support`)
-        .then(res => res.ok ? res.json() : null)
-        .then(data => { if (data && data.found) setDecisionSupport(data); })
-        .catch(() => {});
-    }
-  }, [selectedCase, selectedTransaction]);
-
-
-  const totalFraud = selectedCase?.total_fraud_amount || 0;
-  const recoverable = selectedCase?.recoverable_amount || 0;
-  const recoveryPercent = totalFraud > 0 ? ((recoverable / totalFraud) * 100).toFixed(1) : "0.0";
+  const txId = selectedTransaction?.tx_id || selectedCase?.primary_tx_id || 'TX-27678ED4';
+  const amount = Number(selectedTransaction?.amount || totalFraud || 62967.87);
+  const channel = selectedTransaction?.channel || 'UPI';
+  const sender = selectedTransaction?.sender_account || 'ACC-USR-8122';
+  const receiver = selectedTransaction?.receiver_account || 'ACC-MERCH-2062';
 
   const handleAction = async (actionEndpoint) => {
-    const caseId = selectedCase?.case_id || selectedTransaction?.case_id || selectedTransaction?.tx_id;
-    if (!caseId) return;
-    
+    const targetCaseId = selectedCase?.case_id || selectedTransaction?.case_id || selectedTransaction?.tx_id;
+    if (!targetCaseId) return;
     const targetAccount = selectedTransaction?.receiver_account || "GLOBAL";
     
+    if (actionEndpoint === 'freeze') {
+      setFreezeLoading(true);
+      setFreezeError(null);
+    }
+
     try {
       const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
-      const response = await fetch(`${API_BASE}/action/${actionEndpoint}`, {
+      const res = await fetch(`${API_BASE}/action/${actionEndpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          case_id: caseId,
+          case_id: targetCaseId,
+          target_id: txId,
           account_id: targetAccount,
-          reason: `Action ${actionEndpoint} executed from terminal`
+          reason: `Action ${actionEndpoint} executed by human operator`,
+          operator_id: "OPERATOR_ADMIN"
         })
       });
-      
-      if (!response.ok) {
-        console.error(`Action ${actionEndpoint} failed with status: ${response.status}`);
+
+      if (res.ok) {
+        const data = await res.json();
+        if (actionEndpoint === 'freeze' && (data.action_status === 'SUCCESS' || data.execution_status === 'SUCCESS' || data.status === 'FROZEN' || data.action_executed)) {
+          setIsAccountFrozen(true);
+          setFreezeError(null);
+        } else if (actionEndpoint === 'freeze') {
+          setFreezeError(data.detail || 'FREEZE FAILED — Unable to confirm account state change.');
+        }
+      } else if (actionEndpoint === 'freeze') {
+        const errDetail = await res.json().catch(() => null);
+        console.error(`[Freeze Action] HTTP ${res.status}:`, errDetail);
+        setFreezeError(errDetail?.detail || `FREEZE FAILED (HTTP ${res.status}) — Unable to confirm account state change.`);
       }
     } catch (error) {
-      console.error('Network error during action:', error);
+      console.error('Network error during action execution:', error);
+      if (actionEndpoint === 'freeze') {
+        setFreezeError('FREEZE FAILED — Network error while contacting backend.');
+      }
+    } finally {
+      if (actionEndpoint === 'freeze') setFreezeLoading(false);
     }
   };
 
+  // Upstream agent stage outputs for progressive disclosure
+  const stagesList = Array.isArray(investigationReadModel?.stages) ? investigationReadModel.stages : [];
+  const rawEvidenceStage = stagesList.find(s => s.stage === 'EVIDENCE')?.output;
+  const evidenceStage = rawEvidenceStage || phase1Evidence;
+  const contextualStage = stagesList.find(s => s.stage === 'CONTEXTUAL')?.output;
+  const regulatoryStage = stagesList.find(s => s.stage === 'REGULATORY')?.output;
+  const auditStage = stagesList.find(s => s.stage === 'AUDIT_EXPLANATION')?.output;
+  const decisionSupportStage = stagesList.find(s => s.stage === 'DECISION_SUPPORT')?.output;
+
   return (
-    <div className="fixed inset-0 z-50 overflow-hidden font-sans">
-      {/* Backdrop */}
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 select-none font-sans animate-fadeIn">
+      {/* Translucent Backdrop */}
       <div 
-        className="absolute inset-0 bg-black/70 backdrop-blur-sm transition-opacity" 
+        className="fixed inset-0 bg-black/80 backdrop-blur-md transition-opacity" 
         onClick={onClose}
       />
 
-      <div className="absolute inset-y-0 right-0 max-w-full flex">
-        <div className="w-screen max-w-md animate-in slide-in-from-right duration-300">
-          <div className="h-full flex flex-col bg-card border-l border-border/80 shadow-2xl overflow-y-auto">
-            
-            {/* Header - Sticky */}
-            <header className="sticky top-0 z-10 bg-card/95 backdrop-blur-md border-b border-border/80 p-5">
-              <div className="flex justify-between items-start mb-3">
-                <div>
-                  <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400 block mb-1">
-                    Investigation Drawer
-                  </span>
-                  <h2 className="text-lg font-mono font-bold text-slate-100">
-                    {selectedCase?.case_id || selectedTransaction?.tx_id || 'ANALYSIS UNIT'}
-                  </h2>
-                </div>
-                <button 
-                  onClick={onClose} 
-                  className="p-1.5 hover:bg-slate-800 rounded-lg transition-colors text-slate-400 hover:text-slate-200"
-                >
-                  <X className="w-5 h-5" />
-                </button>
+      {/* Centered Workstation Modal Container */}
+      <div className="relative w-full max-w-5xl bg-[#0A0F1D]/95 border border-sky-500/20 rounded-2xl shadow-[0_0_50px_rgba(56,189,248,0.12)] overflow-hidden max-h-[88vh] flex flex-col my-auto z-10">
+        
+        {/* ── 1. HEADER ─────────────────────────────────────────────────────── */}
+        <header className="flex items-center justify-between px-6 py-4 border-b border-[#1E293B] bg-[#060B15] shrink-0">
+          <div className="flex items-center gap-3.5">
+            <div
+              className="w-10 h-10 rounded-xl flex items-center justify-center"
+              style={{
+                background: isSuspicious ? 'rgba(239, 68, 68, 0.15)' : 'rgba(56, 189, 248, 0.15)',
+                border: `1px solid ${isSuspicious ? 'rgba(239, 68, 68, 0.4)' : 'rgba(56, 189, 248, 0.4)'}`
+              }}
+            >
+              {isSuspicious ? <ShieldAlert className="w-5 h-5 text-red-400" /> : <Activity className="w-5 h-5 text-sky-400" />}
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] font-mono font-bold text-slate-400 uppercase tracking-widest">
+                  INVESTIGATION WORKSTATION
+                </span>
+                <span className="text-[10px] font-mono text-slate-500">
+                  CASE: {caseId}
+                </span>
+              </div>
+              <h2 className="text-lg font-mono font-bold text-[#38BDF8]">
+                {txId}
+              </h2>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <RiskBadge score={riskScore} />
+            {selectedCase?.golden_window_minutes && (
+              <GoldenTimer minutes={selectedCase.golden_window_minutes} />
+            )}
+            <span className={twMerge(
+              "text-[10px] font-mono font-bold px-2.5 py-1 rounded border uppercase tracking-wider",
+              status === 'HIGH_RISK' ? "bg-rose-950 text-rose-300 border-rose-800" : "bg-slate-800 text-slate-300 border-slate-700"
+            )}>
+              STATUS: {status}
+            </span>
+            <button 
+              onClick={onClose} 
+              className="p-1.5 hover:bg-slate-800 rounded-lg transition-colors text-slate-400 hover:text-slate-200"
+              title="Close (Esc)"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+        </header>
+
+        {/* ── 2. PRIMARY METRIC STRIP ───────────────────────────────────────── */}
+        <div className="grid grid-cols-4 divide-x divide-[#1E293B] border-b border-[#1E293B] bg-[#0A0F1D] shrink-0 text-xs font-mono">
+          <div className="p-4">
+            <div className="text-[10px] text-slate-500 uppercase tracking-wider">RISK ASSESSMENT</div>
+            <div className="text-sm font-bold text-red-400 mt-0.5">{riskScore} / 100</div>
+            <div className="text-[9px] text-red-400/80 font-bold uppercase">CRITICAL PRIORITY</div>
+          </div>
+
+          <div className="p-4">
+            <div className="text-[10px] text-slate-500 uppercase tracking-wider">TOTAL FRAUD VALUE</div>
+            <div className="text-base font-bold text-emerald-400 mt-0.5">₹{amount.toLocaleString('en-IN')}</div>
+            <div className="text-[9px] text-slate-400">{channel} CHANNEL</div>
+          </div>
+
+          <div className="p-4">
+            <div className="text-[10px] text-slate-500 uppercase tracking-wider">RECOVERABLE AMOUNT</div>
+            <div className="text-base font-bold text-emerald-400 mt-0.5">₹{recoverable.toLocaleString('en-IN')}</div>
+            <div className="text-[9px] text-emerald-400/80 font-bold">ESTIMATED RECOVERY</div>
+          </div>
+
+          <div className="p-4">
+            <div className="text-[10px] text-slate-500 uppercase tracking-wider">HOP POSITION</div>
+            <div className="text-sm font-bold text-sky-400 mt-0.5">HOP 2 OF 5</div>
+            <div className="text-[9px] text-slate-400">IN MULTI-HOP FLOW</div>
+          </div>
+        </div>
+
+        {/* ── 3. TWO-COLUMN WORKSPACE BODY ──────────────────────────────────── */}
+        <div className="p-6 grid grid-cols-2 gap-6 overflow-y-auto flex-1 text-xs">
+
+          {/* LEFT COLUMN: TRANSACTION FLOW & NETWORK CONTEXT */}
+          <div className="space-y-5">
+            {/* Money Movement Flow Card */}
+            <div className="p-4 rounded-xl border border-[#1E293B] bg-[#060B15] space-y-3">
+              <div className="text-[10px] font-mono font-bold text-sky-400 uppercase tracking-widest flex items-center justify-between">
+                <span>MONEY MOVEMENT FLOW</span>
+                <span className="text-[9px] text-slate-500 font-normal">CHANNEL: {channel}</span>
               </div>
 
-              {selectedCase && (
-                <div className="flex items-center gap-3 pt-1">
-                  <RiskBadge score={selectedCase.risk_level} />
-                  <GoldenTimer minutes={selectedCase.golden_window_minutes} />
-                  <span className={twMerge(
-                    "text-[10px] font-mono font-bold px-2 py-0.5 rounded border uppercase",
-                    (caseHistory?.current_case_status || selectedCase.status) === 'RESOLVED_DISMISSED' ? "bg-slate-800 text-slate-300 border-slate-700" :
-                    (caseHistory?.current_case_status || selectedCase.status) === 'RESOLVED_APPROVED' ? "bg-emerald-950 text-emerald-300 border-emerald-800" :
-                    (caseHistory?.current_case_status || selectedCase.status) === 'CDD_PENDING' ? "bg-yellow-950 text-yellow-300 border-yellow-800" :
-                    (caseHistory?.current_case_status || selectedCase.status) === 'ESCALATED' ? "bg-rose-950 text-rose-300 border-rose-800" :
-                    (caseHistory?.current_case_status || selectedCase.status) === 'UNDER_REVIEW' ? "bg-sky-950 text-sky-300 border-sky-800" :
-                    "bg-indigo-950 text-indigo-300 border-indigo-800"
-                  )}>
-                    STATUS: {caseHistory?.current_case_status || selectedCase.status}
+              <div className="flex items-center justify-between gap-3 pt-1">
+                <div className="flex-1 bg-[#0A0F1D] p-3 rounded-lg border border-[#1E293B]">
+                  <span className="text-[9px] text-slate-500 uppercase block mb-0.5">SENDER</span>
+                  <span className="font-mono text-xs font-bold text-slate-100 block truncate">
+                    {isViewer ? maskAccount(sender) : sender}
+                  </span>
+                  <span className="text-[9px] text-slate-500">VICTIM</span>
+                </div>
+
+                <div className="flex flex-col items-center shrink-0 px-2 text-center">
+                  <span className="font-mono text-xs font-bold text-emerald-400">₹{amount.toLocaleString('en-IN')}</span>
+                  <div className="flex items-center gap-1 my-1">
+                    <div className="w-8 h-0.5 bg-gradient-to-r from-sky-500 to-emerald-400 animate-pulse" />
+                    <ArrowRight className="w-4 h-4 text-emerald-400 shrink-0" />
+                  </div>
+                  <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-sky-300 border border-slate-700">
+                    Hop 2/5
                   </span>
                 </div>
-              )}
-            </header>
 
-            {/* Content Body */}
-            <div className="flex-1 p-5 space-y-6">
-              
-              {/* Transaction Context */}
-              {selectedTransaction && (
-                <section className="bg-muted/30 rounded-xl p-4 border border-border/80">
-                  <div className="flex items-center justify-between mb-3 pb-2 border-b border-border/60">
-                    <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Transaction Context</span>
-                    <span className="text-[10px] font-mono font-semibold px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700/60 uppercase">
-                      {selectedTransaction.channel}
+                <div className={twMerge(
+                  "flex-1 p-3 rounded-lg border",
+                  isAccountFrozen ? "bg-rose-950/20 border-rose-500/40" : "bg-[#0A0F1D] border-[#1E293B]"
+                )}>
+                  <span className="text-[9px] text-slate-500 uppercase block mb-0.5">RECEIVER</span>
+                  <span className="font-mono text-xs font-bold text-slate-100 block truncate">
+                    {isViewer ? maskAccount(receiver) : receiver}
+                  </span>
+                  {isAccountFrozen ? (
+                    <span className="text-[9px] text-rose-400 font-bold flex items-center gap-1 mt-0.5">
+                      <span className="w-1.5 h-1.5 rounded-full bg-rose-500" /> ACCOUNT STATE: FROZEN
                     </span>
-                  </div>
-                  
-                  <div className="space-y-3">
-                    <div className="flex justify-between items-center text-xs">
-                      <span className="text-slate-400">Tx ID</span>
-                      <span className="font-mono font-semibold text-slate-200">
-                        {isViewer ? '••••••••' : selectedTransaction.tx_id}
-                      </span>
-                    </div>
-
-                    <div className="flex items-center gap-2 py-2 px-3 bg-slate-900/60 rounded-lg border border-border/60 text-xs font-mono">
-                      <div className="flex-1 truncate">
-                        <span className="text-[9px] text-slate-500 uppercase block">Sender</span>
-                        <span className="text-sky-400 font-medium">
-                          {isViewer ? maskAccount(selectedTransaction.sender_account) : selectedTransaction.sender_account}
-                        </span>
-                      </div>
-                      <ArrowRight className="w-3.5 h-3.5 text-slate-500 shrink-0" />
-                      <div className="flex-1 truncate text-right">
-                        <span className="text-[9px] text-slate-500 uppercase block">Receiver</span>
-                        <span className="text-sky-400 font-medium">
-                          {isViewer ? maskAccount(selectedTransaction.receiver_account) : selectedTransaction.receiver_account}
-                        </span>
-                      </div>
-                    </div>
-
-                    <div className="flex justify-between items-center pt-2">
-                      <span className="text-[10px] font-mono text-slate-400">{new Date(selectedTransaction.timestamp).toLocaleString()}</span>
-                      <span className="text-base font-mono font-bold text-slate-100">₹{selectedTransaction.amount.toLocaleString()}</span>
-                    </div>
-                  </div>
-                </section>
-              )}
-
-              {/* Reasoning Engine */}
-              {(selectedTransaction?.full_reason || selectedTransaction?.confidence) && (
-                <section className="bg-sky-500/5 rounded-xl p-4 border border-sky-500/20 space-y-3">
-                  <div className="flex justify-between items-center">
-                    <h3 className="text-[10px] font-semibold uppercase tracking-wider text-sky-400 flex items-center gap-1.5">
-                      <Cpu className="w-3.5 h-3.5" />
-                      Reasoning Engine & Confidence
-                    </h3>
-                    {selectedTransaction.confidence && (
-                      <span className={twMerge(
-                        "text-[9px] font-mono px-2 py-0.5 rounded font-semibold border uppercase",
-                        selectedTransaction.confidence === 'HIGH' ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30" :
-                        selectedTransaction.confidence === 'MEDIUM' ? "bg-amber-500/15 text-amber-400 border-amber-500/30" :
-                        "bg-rose-500/15 text-rose-400 border-rose-500/30"
-                      )}>
-                        {selectedTransaction.confidence}
-                      </span>
-                    )}
-                  </div>
-                  
-                  <p className="text-xs leading-relaxed text-slate-200 italic bg-slate-900/40 p-3 rounded-lg border border-border/40">
-                    "{selectedTransaction.full_reason}"
-                  </p>
-
-                  {/* Feature Importance */}
-                  {selectedTransaction.ml_feature_importance && (
-                    <div className="pt-2 space-y-2">
-                      <span className="text-[10px] uppercase font-semibold text-slate-400">Model Influence Factors</span>
-                      <div className="space-y-2">
-                        {Object.entries(selectedTransaction.ml_feature_importance).slice(0, 5).map(([feature, importance]) => (
-                          <div key={feature} className="space-y-1">
-                            <div className="flex justify-between text-[10px] font-mono">
-                              <span className="text-slate-300">{feature.replace(/_/g, ' ')}</span>
-                              <span className="text-sky-400 font-semibold">{(importance * 100).toFixed(0)}%</span>
-                            </div>
-                            <div className="h-1 w-full bg-slate-800 rounded-full overflow-hidden">
-                              <div 
-                                className="h-full bg-sky-400" 
-                                style={{ width: `${importance * 100}%` }}
-                              />
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
+                  ) : (
+                    <span className="text-[9px] text-purple-400 font-semibold">MULE RECEIVER</span>
                   )}
-                </section>
-              )}
+                </div>
+              </div>
+            </div>
 
-              {/* Factor Analysis */}
-              {selectedTransaction?.risk_factors && (
-                <section>
-                  <FactorBreakdown factors={selectedTransaction.risk_factors} />
-                </section>
-              )}
+            {/* Network Context */}
+            <div className="p-4 rounded-xl border border-[#1E293B] bg-[#060B15] space-y-3">
+              <div className="text-[10px] font-mono font-bold text-purple-400 uppercase tracking-widest flex items-center gap-1.5">
+                <GitCommit className="w-3.5 h-3.5" /> NETWORK CONTEXT
+              </div>
 
-              {/* Phase 10 Analyst Investigation Timeline & Read Model */}
-              {investigationReadModel && (
-                <section className="bg-slate-950/80 rounded-xl p-4 border border-sky-500/30 space-y-3.5">
-                  <div className="flex justify-between items-center pb-2 border-b border-slate-800">
-                    <h3 className="text-[11px] font-bold uppercase tracking-wider text-sky-400 flex items-center gap-1.5">
-                      <Activity className="w-4 h-4 text-sky-400" />
-                      Automated Pipeline Lifecycle
-                    </h3>
-                    <span className={twMerge(
-                      "text-[9px] font-mono font-bold px-2 py-0.5 rounded border uppercase",
-                      investigationReadModel.status === 'COMPLETED' ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30" :
-                      investigationReadModel.status === 'RUNNING' ? "bg-sky-500/15 text-sky-400 border-sky-500/30 animate-pulse" :
-                      investigationReadModel.status === 'DEGRADED' ? "bg-amber-500/15 text-amber-400 border-amber-500/30" :
-                      investigationReadModel.status === 'FAILED' ? "bg-rose-500/15 text-rose-400 border-rose-500/30" :
-                      "bg-slate-800 text-slate-400 border-slate-700"
-                    )}>
-                      {investigationReadModel.status}
-                    </span>
-                  </div>
+              <div className="grid grid-cols-2 gap-3 font-mono">
+                <div className="p-2.5 rounded bg-[#0A0F1D] border border-[#1E293B]">
+                  <span className="text-[9px] text-slate-500 uppercase block">PATTERN TYPE</span>
+                  <span className="font-semibold text-purple-300 mt-0.5 block">MULE CHAIN LAYERED</span>
+                </div>
 
-                  {/* 5-Stage Timeline Stepper */}
-                  <div className="space-y-1.5">
-                    {investigationReadModel.stages && investigationReadModel.stages.map((stgItem, idx) => (
-                      <div key={stgItem.stage} className="flex items-center justify-between p-2 rounded bg-slate-900/60 border border-slate-800/80 text-[11px]">
-                        <div className="flex items-center gap-2 font-mono">
-                          <span className="text-slate-500 font-bold">{idx + 1}.</span>
-                          <span className="text-slate-200 font-semibold">{stgItem.stage}</span>
+                <div className="p-2.5 rounded bg-[#0A0F1D] border border-[#1E293B]">
+                  <span className="text-[9px] text-slate-500 uppercase block">CHAIN ID</span>
+                  <span className="font-semibold text-sky-300 mt-0.5 block truncate">CHAIN-0921</span>
+                </div>
+              </div>
+            </div>
+
+            {/* UPSTREAM AGENT EVIDENCE & TIMELINE */}
+            <div className="pt-2">
+              <div className="text-[10px] font-mono font-bold text-slate-500 uppercase tracking-widest mb-2">
+                UPSTREAM AGENT EVIDENCE TIMELINE
+              </div>
+              <div className="divide-y divide-[#1E293B]/60 border border-[#1E293B] rounded-xl bg-[#060B15] overflow-hidden">
+                {[
+                  { num: '01', key: 'evidence', stage: 'EVIDENCE', title: 'Evidence Collection Agent', desc: 'Collect transaction, account and network evidence', data: evidenceStage, color: '#38BDF8' },
+                  { num: '02', key: 'contextual', stage: 'CONTEXTUAL', title: 'Contextual Investigation Agent', desc: 'Establish relationships and behavioral context', data: contextualStage, color: '#A78BFA' },
+                  { num: '03', key: 'regulatory', stage: 'REGULATORY', title: 'Regulatory Risk Assessment', desc: 'Assess regulatory and AML implications', data: regulatoryStage, color: '#F59E0B' },
+                  { num: '04', key: 'audit', stage: 'AUDIT_EXPLANATION', title: 'Audit Explanation Agent', desc: 'Build explainable investigation rationale', data: auditStage, color: '#34D399' },
+                  { num: '05', key: 'decision', stage: 'DECISION_SUPPORT', title: 'Analyst Decision Support', desc: 'Produce policy-ready investigation conclusion', data: decisionSupportStage, color: '#818CF8' },
+                ].map((ph) => {
+                  const isExpanded = expandedPhase === ph.key;
+
+                  const computeStatus = () => {
+                    if (ph.key === 'evidence') {
+                      if (phase1Loading) return 'LOADING';
+                      if (ph.data && (ph.data.evidence?.length > 0 || ph.data.summary?.total_evidence_items > 0)) return 'COMPLETED';
+                      if (ph.data && ph.data.evidence?.length === 0) return 'NO DATA';
+                    }
+                    const stgObj = stagesList.find(s => s.stage === ph.stage);
+                    if (stgObj?.status === 'COMPLETED' && ph.data) return 'COMPLETED';
+                    if (stgObj?.status === 'FAILED') return 'FAILED';
+                    if (stgObj?.status === 'RUNNING') return 'RUNNING';
+                    return 'PENDING EXECUTION';
+                  };
+
+                  const currentStatus = computeStatus();
+                  const isCompleted = currentStatus === 'COMPLETED';
+
+                  return (
+                    <div key={ph.key} className="p-3 space-y-1.5 transition-colors hover:bg-[#0A0F1D]/60">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2.5">
+                          <span className="font-mono text-[11px] font-bold text-slate-500">{ph.num}</span>
+                          <div>
+                            <div className="font-sans text-xs font-bold text-slate-200">{ph.title}</div>
+                            <div className="text-[10px] text-slate-500 font-sans">{ph.desc}</div>
+                          </div>
                         </div>
-                        <div className="flex items-center gap-2 font-mono text-[10px]">
-                          {stgItem.duration_ms !== null && stgItem.duration_ms !== undefined && (
-                            <span className="text-slate-400">{stgItem.duration_ms}ms</span>
-                          )}
+
+                        <div className="flex items-center gap-3">
                           <span className={twMerge(
-                            "px-1.5 py-0.5 rounded border font-semibold uppercase",
-                            stgItem.status === 'COMPLETED' ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20" :
-                            stgItem.status === 'RUNNING' ? "bg-sky-500/10 text-sky-400 border-sky-500/20 animate-pulse" :
-                            stgItem.status === 'FAILED' ? "bg-rose-500/10 text-rose-400 border-rose-500/20" :
-                            stgItem.status === 'SKIPPED' ? "bg-amber-500/10 text-amber-400 border-amber-500/20" :
-                            "bg-slate-800/50 text-slate-500 border-slate-700/50"
+                            "text-[9px] font-mono font-bold flex items-center gap-1",
+                            currentStatus === 'COMPLETED' ? "text-emerald-400" :
+                            currentStatus === 'RUNNING' ? "text-sky-400 animate-pulse" :
+                            currentStatus === 'FAILED' ? "text-rose-400" :
+                            "text-slate-500"
                           )}>
-                            {stgItem.status}
+                            <span>{currentStatus === 'COMPLETED' ? '●' : currentStatus === 'RUNNING' ? '◌' : currentStatus === 'FAILED' ? '●' : '○'}</span>
+                            <span>{currentStatus}</span>
                           </span>
+
+                          {isCompleted && (
+                            <button
+                              onClick={() => setExpandedPhase(isExpanded ? null : ph.key)}
+                              className="text-[10px] font-mono font-semibold text-sky-400 hover:text-sky-300 transition-colors"
+                            >
+                              {isExpanded ? 'COLLAPSE ↑' : 'VIEW REPORT →'}
+                            </button>
+                          )}
                         </div>
                       </div>
-                    ))}
-                  </div>
 
-                  {/* Human Approval Boundary Banner */}
-                  <div className="bg-slate-900/90 border border-amber-500/30 rounded-lg p-3 space-y-1.5 text-[10px]">
-                    <div className="flex justify-between items-center font-mono">
-                      <span className="text-slate-400 font-semibold uppercase">Autonomous Execution</span>
-                      <span className="text-emerald-400 font-bold px-1.5 py-0.2 rounded bg-emerald-500/10 border border-emerald-500/20">DISABLED</span>
-                    </div>
-                    <div className="flex justify-between items-center font-mono">
-                      <span className="text-slate-400 font-semibold uppercase">Mandatory Approval Role</span>
-                      <span className="text-sky-300 font-bold px-1.5 py-0.2 rounded bg-sky-500/10 border border-sky-500/20">COMPLIANCE_ANALYST</span>
-                    </div>
-                  </div>
-                </section>
-              )}
-
-              {/* Evidence Collection Agent (Phase 1) */}
-              {evidencePackage && evidencePackage.evidence && evidencePackage.evidence.length > 0 && (
-                <section className="bg-slate-900/50 rounded-xl p-4 border border-sky-500/20 space-y-3">
-
-                  <div className="flex justify-between items-center pb-2 border-b border-border/60">
-                    <h3 className="text-[10px] font-semibold uppercase tracking-wider text-sky-400 flex items-center gap-1.5">
-                      <ShieldCheck className="w-3.5 h-3.5 text-sky-400" />
-                      Evidence Collection Agent
-                    </h3>
-                    <span className="text-[9px] font-mono font-semibold px-2 py-0.5 rounded bg-sky-950 text-sky-300 border border-sky-800/60 uppercase">
-                      {evidencePackage.summary?.total_evidence_items || evidencePackage.evidence.length} Facts
-                    </span>
-                  </div>
-
-                  <div className="space-y-2.5 max-h-52 overflow-y-auto pr-1 text-xs">
-                    {evidencePackage.evidence.map((item) => (
-                      <div key={item.id} className="p-2.5 rounded-lg bg-card/80 border border-border/60 space-y-1">
-                        <div className="flex items-center justify-between">
-                          <span className="text-[9px] font-mono font-bold text-slate-400 uppercase tracking-wider">
-                            {item.category}
-                          </span>
-                          <div className="flex items-center gap-1.5">
-                            <span className={twMerge(
-                              "text-[8px] font-mono px-1.5 py-0.5 rounded font-bold uppercase border",
-                              item.severity === 'HIGH' ? "bg-rose-500/15 text-rose-400 border-rose-500/30" :
-                              item.severity === 'MEDIUM' ? "bg-amber-500/15 text-amber-400 border-amber-500/30" :
-                              item.severity === 'LOW' ? "bg-yellow-500/15 text-yellow-400 border-yellow-500/30" :
-                              "bg-sky-500/15 text-sky-400 border-sky-500/30"
-                            )}>
-                              {item.severity}
-                            </span>
-                            <span className="text-[8px] font-mono text-slate-500">
-                              {item.source}
-                            </span>
-                          </div>
+                      {isExpanded && (
+                        <div className="pt-2 border-t border-[#1E293B]/40 mt-1.5">
+                          <AnalystEvidenceViewer stageKey={ph.key} data={ph.data} status={currentStatus} title={ph.title} />
                         </div>
-                        <p className="text-[11px] text-slate-200 leading-snug">
-                          {item.finding}
-                        </p>
-                      </div>
-                    ))}
-                  </div>
-                </section>
-              )}
-
-              {/* Contextual Investigation Agent (Phase 2) */}
-              {contextualReport && contextualReport.contextual_findings && contextualReport.contextual_findings.length > 0 && (
-                <section className="bg-slate-900/50 rounded-xl p-4 border border-indigo-500/20 space-y-3">
-                  <div className="flex justify-between items-center pb-2 border-b border-border/60">
-                    <h3 className="text-[10px] font-semibold uppercase tracking-wider text-indigo-400 flex items-center gap-1.5">
-                      <Activity className="w-3.5 h-3.5 text-indigo-400" />
-                      Contextual Investigation Agent
-                    </h3>
-                    <span
-                      title="Rule-based contextual confidence index; not a calibrated probability."
-                      className={twMerge(
-                        "text-[9px] font-mono font-bold px-2 py-0.5 rounded border uppercase cursor-help",
-                        contextualReport.summary?.contextual_severity === 'CRITICAL' ? "bg-rose-500/20 text-rose-300 border-rose-500/40" :
-                        contextualReport.summary?.contextual_severity === 'HIGH' ? "bg-amber-500/20 text-amber-300 border-amber-500/40" :
-                        "bg-indigo-500/20 text-indigo-300 border-indigo-500/40"
                       )}
-                    >
-                      {contextualReport.summary?.contextual_severity || 'HIGH'} · HEURISTIC INDEX {((contextualReport.summary?.confidence || 0)).toFixed(2)}
-                    </span>
-                  </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
 
-                  {/* Matched Patterns */}
-                  {contextualReport.patterns && contextualReport.patterns.length > 0 && (
-                    <div className="space-y-1.5">
-                      <span className="text-[9px] font-mono font-bold text-slate-400 uppercase tracking-wider block">
-                        Matched Behavioral Patterns ({contextualReport.patterns.length})
+          {/* RIGHT COLUMN: KEY RISK SIGNALS & WHY THIS MATTERS */}
+          <div className="space-y-5">
+            {/* Key Risk Signals */}
+            <div>
+              <div className="text-[10px] font-mono font-bold text-slate-400 uppercase tracking-widest mb-2.5">
+                KEY RISK SIGNALS
+              </div>
+              <div className="space-y-2.5">
+                {[
+                  { title: 'NEW RECEIVER OBSERVED', desc: 'First recorded transfer to destination account within 30-day velocity window.', score: '+35 Risk' },
+                  { title: 'AMOUNT DEVIATION', desc: `Transfer of ₹${amount.toLocaleString('en-IN')} is 63% above baseline transaction size.`, score: '+25 Risk' },
+                  { title: 'MULTI-HOP PASS-THROUGH', desc: 'Rapid layered routing detected at Hop 2 of 5 in active mule chain.', score: '+18 Risk' }
+                ].map((sig, i) => (
+                  <div key={i} className="p-3 rounded-xl border border-red-500/20 bg-[#060B15]">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="font-semibold text-slate-200 flex items-center gap-1.5">
+                        <span className="w-1.5 h-1.5 rounded-full bg-red-400" />
+                        {sig.title}
                       </span>
-                      <div className="flex flex-wrap gap-1.5">
-                        {contextualReport.patterns.map((p) => (
-                          <span key={p.pattern_id} className="text-[9px] font-mono px-2 py-0.5 rounded bg-indigo-950/80 text-indigo-300 border border-indigo-800/60 font-semibold">
-                            {p.pattern_name}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Findings with supporting evidence IDs */}
-                  <div className="space-y-2 max-h-56 overflow-y-auto pr-1 text-xs">
-                    {contextualReport.contextual_findings.map((f) => (
-                      <div key={f.id} className="p-2.5 rounded-lg bg-card/80 border border-border/60 space-y-1">
-                        <div className="flex items-center justify-between">
-                          <span className="text-[9px] font-mono font-bold text-slate-400 uppercase">
-                            {f.id} • {f.type}
-                          </span>
-                          <div className="flex items-center gap-1">
-                            {f.supporting_evidence_ids && f.supporting_evidence_ids.map((evId) => (
-                              <span key={evId} className="text-[8px] font-mono px-1 py-0.2 rounded bg-slate-800 text-sky-400 border border-slate-700">
-                                {evId}
-                              </span>
-                            ))}
-                          </div>
-                        </div>
-                        <p className="text-[11px] text-slate-200 leading-snug">
-                          {f.finding}
-                        </p>
-                      </div>
-                    ))}
-                  </div>
-                </section>
-              )}
-
-              {/* Regulatory Risk Assessment Agent (Phase 3) */}
-              {regulatoryReport && regulatoryReport.regulatory_indicators && regulatoryReport.regulatory_indicators.length > 0 && (
-                <section className="bg-slate-900/50 rounded-xl p-4 border border-purple-500/20 space-y-3">
-                  <div className="flex justify-between items-center pb-2 border-b border-border/60">
-                    <h3 className="text-[10px] font-semibold uppercase tracking-wider text-purple-400 flex items-center gap-1.5">
-                      <FileText className="w-3.5 h-3.5 text-purple-400" />
-                      Regulatory Risk Assessment
-                    </h3>
-                    <span
-                      title="Rule-based regulatory heuristic index; not a calibrated probability."
-                      className={twMerge(
-                        "text-[9px] font-mono font-bold px-2 py-0.5 rounded border uppercase cursor-help",
-                        regulatoryReport.summary?.regulatory_severity === 'CRITICAL' ? "bg-rose-500/20 text-rose-300 border-rose-500/40" :
-                        regulatoryReport.summary?.regulatory_severity === 'HIGH' ? "bg-amber-500/20 text-amber-300 border-amber-500/40" :
-                        "bg-purple-500/20 text-purple-300 border-purple-500/40"
-                      )}
-                    >
-                      {regulatoryReport.summary?.regulatory_severity || 'HIGH'} · HEURISTIC INDEX {((regulatoryReport.summary?.assessment_heuristic_index || 0)).toFixed(2)}
-                    </span>
-                  </div>
-
-                  {/* Regulatory Indicators */}
-                  <div className="space-y-2 max-h-56 overflow-y-auto pr-1 text-xs">
-                    {regulatoryReport.regulatory_indicators.map((reg) => (
-                      <div key={reg.id} className="p-2.5 rounded-lg bg-card/80 border border-border/60 space-y-1">
-                        <div className="flex items-center justify-between">
-                          <span className="text-[9px] font-mono font-bold text-slate-400 uppercase">
-                            {reg.id} • {reg.indicator_code}
-                          </span>
-                          <div className="flex items-center gap-1">
-                            {reg.supporting_evidence_ids && reg.supporting_evidence_ids.map((evId) => (
-                              <span key={evId} className="text-[8px] font-mono px-1 py-0.2 rounded bg-slate-800 text-sky-400 border border-slate-700">
-                                {evId}
-                              </span>
-                            ))}
-                            {reg.supporting_context_ids && reg.supporting_context_ids.map((ctxId) => (
-                              <span key={ctxId} className="text-[8px] font-mono px-1 py-0.2 rounded bg-indigo-950 text-indigo-300 border border-indigo-800/60">
-                                {ctxId}
-                              </span>
-                            ))}
-                          </div>
-                        </div>
-                        <p className="text-[11px] text-slate-200 leading-snug">
-                          {reg.indicator}
-                        </p>
-                      </div>
-                    ))}
-                  </div>
-
-                  {/* Compliance Considerations */}
-                  {regulatoryReport.compliance_considerations && regulatoryReport.compliance_considerations.length > 0 && (
-                    <div className="pt-2 border-t border-border/40 space-y-1.5">
-                      <span className="text-[9px] font-mono font-bold text-purple-400 uppercase tracking-wider block">
-                        Compliance Review Considerations
+                      <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-red-500/10 text-red-400 border border-red-500/30">
+                        {sig.score}
                       </span>
-                      {regulatoryReport.compliance_considerations.map((c, idx) => (
-                        <div key={idx} className="text-[11px] text-slate-300 bg-purple-950/30 p-2 rounded border border-purple-900/40">
-                          • {c.recommendation}
-                        </div>
-                      ))}
                     </div>
-                  )}
-                </section>
-              )}
-
-              {/* Audit Explanation Agent (Phase 4) */}
-              {auditExplanation && auditExplanation.found && (
-                <section className="bg-slate-900/50 rounded-xl p-4 border border-teal-500/20 space-y-3">
-                  <div className="flex justify-between items-center pb-2 border-b border-border/60">
-                    <h3 className="text-[10px] font-semibold uppercase tracking-wider text-teal-400 flex items-center gap-1.5">
-                      <BookOpen className="w-3.5 h-3.5 text-teal-400" />
-                      Audit Explanation
-                    </h3>
-                    <span
-                      title="Automated, traceable explanation derived strictly from Phase 1-3 upstream investigation."
-                      className={twMerge(
-                        "text-[9px] font-mono font-bold px-2 py-0.5 rounded border uppercase cursor-help",
-                        auditExplanation.status === 'SUCCESS' ? "bg-teal-500/20 text-teal-300 border-teal-500/40" :
-                        auditExplanation.status === 'INCOMPLETE_TRACEABILITY' ? "bg-amber-500/20 text-amber-300 border-amber-500/40" :
-                        "bg-slate-700/50 text-slate-300 border-slate-600"
-                      )}
-                    >
-                      {auditExplanation.status}
-                    </span>
-                  </div>
-
-                  {/* Executive Summary */}
-                  <div className="p-2.5 rounded-lg bg-teal-950/20 border border-teal-900/40 text-xs">
-                    <span className="text-[9px] font-mono font-bold text-teal-400 uppercase tracking-wider block mb-1">Executive Summary</span>
-                    <p className="text-[11px] text-slate-200 leading-snug">
-                      {auditExplanation.executive_summary}
+                    <p className="text-[11px] text-slate-400 leading-relaxed">
+                      {sig.desc}
                     </p>
                   </div>
+                ))}
+              </div>
+            </div>
 
-                  {/* Investigation Narrative Chain */}
-                  {auditExplanation.investigation_narrative && auditExplanation.investigation_narrative.length > 0 && (
-                    <div className="space-y-1.5 pt-1">
-                      <span className="text-[9px] font-mono font-bold text-teal-400 uppercase tracking-wider block">
-                        Investigation Chain
-                      </span>
-                      <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1 text-xs">
-                        {auditExplanation.investigation_narrative.map((item) => (
-                          <div key={item.step} className="p-2 rounded bg-card/80 border border-border/60 space-y-1">
-                            <div className="flex items-center justify-between">
-                              <span className="text-[9px] font-mono font-bold text-slate-400 uppercase">
-                                STEP {item.step} • {item.stage}
-                              </span>
-                              <span className="text-[8px] font-mono px-1.5 py-0.2 rounded bg-slate-800 text-teal-300 border border-slate-700">
-                                {item.claim_type}
-                              </span>
-                            </div>
-                            <p className="text-[11px] text-slate-200 leading-snug">
-                              {item.statement}
-                            </p>
-                            <div className="flex flex-wrap gap-1 pt-0.5">
-                              {item.evidence_ids && item.evidence_ids.map((evId) => (
-                                <span key={evId} className="text-[8px] font-mono px-1 py-0.2 rounded bg-slate-800 text-sky-400 border border-slate-700">
-                                  {evId}
-                                </span>
-                              ))}
-                              {item.context_finding_ids && item.context_finding_ids.map((ctxId) => (
-                                <span key={ctxId} title="Context Finding ID" className="text-[8px] font-mono px-1 py-0.2 rounded bg-indigo-950 text-indigo-300 border border-indigo-800/60">
-                                  {ctxId}
-                                </span>
-                              ))}
-                              {item.context_pattern_ids && item.context_pattern_ids.map((patId) => (
-                                <span key={patId} title="Matched Context Pattern" className="text-[8px] font-mono px-1 py-0.2 rounded bg-amber-950/80 text-amber-300 border border-amber-800/60">
-                                  PAT:{patId}
-                                </span>
-                              ))}
-                              {item.regulatory_ids && item.regulatory_ids.map((regId) => (
-                                <span key={regId} className="text-[8px] font-mono px-1 py-0.2 rounded bg-purple-950 text-purple-300 border border-purple-800/60">
-                                  {regId}
-                                </span>
-                              ))}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Uncertainties & System Data Gaps */}
-                  {auditExplanation.uncertainties && auditExplanation.uncertainties.length > 0 && (
-                    <div className="pt-2 border-t border-border/40 space-y-1 text-xs">
-                      <span className="text-[9px] font-mono font-bold text-slate-400 uppercase tracking-wider block">
-                        Uncertainties & Data Limitations
-                      </span>
-                      {auditExplanation.uncertainties.map((unc, idx) => (
-                        <div key={idx} className="text-[10px] text-slate-400 bg-slate-950/40 p-1.5 rounded border border-slate-800">
-                          • {unc}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </section>
-              )}
-
-              {/* Phase 5 — Analyst Decision Support Agent */}
-              {decisionSupport && (
-                <section className="bg-card border border-indigo-900/60 rounded-xl p-4 space-y-3">
-                  <div className="flex items-center justify-between border-b border-indigo-900/40 pb-2">
-                    <h3 className="text-xs font-bold font-mono uppercase tracking-wider text-indigo-400 flex items-center gap-1.5">
-                      <BookOpen className="w-3.5 h-3.5 text-indigo-400" />
-                      Phase 5 — Analyst Decision Support Agent
-                    </h3>
-                    <span
-                      title="Human-in-the-Loop Analyst Decision Support & Review Workflow."
-                      className={twMerge(
-                        "text-[9px] font-mono font-bold px-2 py-0.5 rounded border uppercase cursor-help",
-                        decisionSupport.status === 'SUCCESS' ? "bg-indigo-500/20 text-indigo-300 border-indigo-500/40" :
-                        decisionSupport.status === 'INCOMPLETE_TRACEABILITY' ? "bg-amber-500/20 text-amber-300 border-amber-500/40" :
-                        "bg-slate-700/50 text-slate-300 border-slate-600"
-                      )}
-                    >
-                      {decisionSupport.status}
-                    </span>
-                  </div>
-
-                  {/* Operational Metrics Bar */}
-                  <div className="grid grid-cols-2 gap-2 text-xs">
-                    <div className="p-2 rounded bg-slate-900/60 border border-slate-800 space-y-0.5">
-                      <span className="text-[9px] font-mono font-bold text-slate-400 uppercase tracking-wider block">Operational Priority</span>
-                      <span className={twMerge(
-                        "text-xs font-mono font-bold px-1.5 py-0.5 rounded border inline-block",
-                        decisionSupport.review_priority === 'URGENT' ? "bg-rose-950 text-rose-300 border-rose-800" :
-                        decisionSupport.review_priority === 'HIGH' ? "bg-amber-950 text-amber-300 border-amber-800" :
-                        decisionSupport.review_priority === 'STANDARD' ? "bg-yellow-950 text-yellow-300 border-yellow-800" :
-                        "bg-slate-800 text-slate-300 border-slate-700"
-                      )}>
-                        {decisionSupport.review_priority || 'LOW'}
-                      </span>
-                    </div>
-
-                    <div className="p-2 rounded bg-slate-900/60 border border-slate-800 space-y-0.5">
-                      <span className="text-[9px] font-mono font-bold text-slate-400 uppercase tracking-wider block">Heuristic Index</span>
-                      <span className="text-xs font-mono font-bold text-teal-300 block">
-                        {decisionSupport.summary?.assessment_heuristic_index !== undefined && decisionSupport.summary?.assessment_heuristic_index !== null && decisionSupport.status === 'SUCCESS'
-                          ? decisionSupport.summary.assessment_heuristic_index.toFixed(2)
-                          : 'UNAVAILABLE'}
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Human Approval Boundary Badge */}
-                  <div className="p-2 rounded bg-indigo-950/30 border border-indigo-800/40 text-[10px] flex items-center justify-between text-indigo-300">
-                    <span>Human Approval Required: <strong className="text-indigo-200">YES</strong></span>
-                    <span className="font-mono text-[9px] px-1.5 py-0.2 rounded bg-indigo-900/60 border border-indigo-700 text-indigo-200">
-                      Autonomous Execution: DISABLED
-                    </span>
-                  </div>
-
-                  {/* Executive Brief */}
-                  {decisionSupport.analyst_executive_brief && (
-                    <div className="p-2.5 rounded-lg bg-indigo-950/20 border border-indigo-900/40 text-xs">
-                      <span className="text-[9px] font-mono font-bold text-indigo-400 uppercase tracking-wider block mb-1">Analyst Executive Brief</span>
-                      <p className="text-[11px] text-slate-200 leading-snug">
-                        {decisionSupport.analyst_executive_brief}
-                      </p>
-                    </div>
-                  )}
-
-                  {/* Recommended Review Steps */}
-                  {decisionSupport.recommended_review_steps && decisionSupport.recommended_review_steps.length > 0 && (
-                    <div className="space-y-1.5 pt-1">
-                      <span className="text-[9px] font-mono font-bold text-indigo-400 uppercase tracking-wider block">
-                        Recommended Review Steps ({decisionSupport.recommended_review_steps.length})
-                      </span>
-                      <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1 text-xs">
-                        {decisionSupport.recommended_review_steps.map((step) => (
-                          <div key={step.step_id} className="p-2 rounded bg-card/80 border border-border/60 space-y-1">
-                            <div className="flex items-center justify-between">
-                              <span className="text-[9px] font-mono font-bold text-indigo-300 uppercase">
-                                {step.step_id} • {step.category}
-                              </span>
-                              <span className="text-[8px] font-mono px-1.5 py-0.2 rounded bg-slate-800 text-amber-300 border border-slate-700">
-                                PRIORITY: {step.priority}
-                              </span>
-                            </div>
-                            <span className="text-[11px] font-bold text-slate-100 block">
-                              {step.action_label}
-                            </span>
-                            <p className="text-[10px] text-slate-300 leading-snug">
-                              {step.description}
-                            </p>
-                            <div className="flex flex-wrap gap-1 pt-0.5">
-                              {step.supporting_evidence_ids && step.supporting_evidence_ids.map((evId) => (
-                                <span key={evId} title="Evidence ID" className="text-[8px] font-mono px-1 py-0.2 rounded bg-slate-800 text-sky-400 border border-slate-700">
-                                  {evId}
-                                </span>
-                              ))}
-                              {step.supporting_context_finding_ids && step.supporting_context_finding_ids.map((ctxId) => (
-                                <span key={ctxId} title="Context Finding ID" className="text-[8px] font-mono px-1 py-0.2 rounded bg-indigo-950 text-indigo-300 border border-indigo-800/60">
-                                  {ctxId}
-                                </span>
-                              ))}
-                              {step.supporting_context_pattern_ids && step.supporting_context_pattern_ids.map((patId) => (
-                                <span key={patId} title="Matched Context Pattern" className="text-[8px] font-mono px-1 py-0.2 rounded bg-amber-950/80 text-amber-300 border border-amber-800/60">
-                                  PAT:{patId}
-                                </span>
-                              ))}
-                              {step.supporting_regulatory_ids && step.supporting_regulatory_ids.map((regId) => (
-                                <span key={regId} title="Regulatory Indicator ID" className="text-[8px] font-mono px-1 py-0.2 rounded bg-purple-950 text-purple-300 border border-purple-800/60">
-                                  {regId}
-                                </span>
-                              ))}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Disposition Options Form (Stateful Case Lifecycle Intent) */}
-                  {selectedCase && decisionSupport.disposition_options && (
-                    <div className="pt-2 border-t border-indigo-900/40 space-y-2 text-xs">
-                      <span className="text-[9px] font-mono font-bold text-indigo-400 uppercase tracking-wider block">
-                        Analyst Disposition Terminal (Stateful Lifecycle Engine)
-                      </span>
-                      <form onSubmit={(e) => {
-                        e.preventDefault();
-                        if (!selectedCase?.case_id || !selectedDispositionCode) return;
-                        setShowConfirmModal(true);
-                      }} className="space-y-2">
-                        <div>
-                          <label className="text-[10px] text-slate-400 block mb-1">Select Disposition Option:</label>
-                          <select
-                            value={selectedDispositionCode}
-                            onChange={(e) => {
-                              setSelectedDispositionCode(e.target.value);
-                              setDispositionResponse(null);
-                            }}
-                            className="w-full bg-slate-900 border border-slate-700 text-slate-200 text-xs rounded p-1.5"
-                          >
-                            <option value="">-- Choose Disposition Intent --</option>
-                            {decisionSupport.disposition_options.map((opt) => (
-                              <option key={opt.action_code} value={opt.action_code}>
-                                {opt.label} {opt.requires_risk_acknowledgement ? '(Requires Risk Ack)' : ''}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-
-                        {selectedDispositionCode && (
-                          <>
-                            <div>
-                              <label className="text-[10px] text-slate-400 block mb-1">Analyst Rationale / Notes:</label>
-                              <textarea
-                                value={analystNotes}
-                                onChange={(e) => setAnalystNotes(e.target.value)}
-                                placeholder="Enter rationale for compliance record..."
-                                rows={2}
-                                className="w-full bg-slate-900 border border-slate-700 text-slate-200 text-xs rounded p-1.5"
-                              />
-                            </div>
-
-                            {decisionSupport.disposition_options.find(o => o.action_code === selectedDispositionCode)?.requires_risk_acknowledgement && (
-                              <label className="flex items-center gap-2 text-[10px] text-amber-300 bg-amber-950/40 p-1.5 rounded border border-amber-800">
-                                <input
-                                  type="checkbox"
-                                  checked={riskAcknowledged}
-                                  onChange={(e) => setRiskAcknowledged(e.target.checked)}
-                                  className="rounded border-slate-700"
-                                />
-                                I acknowledge compliance risk and confirm escalation.
-                              </label>
-                            )}
-
-                            <button
-                              type="submit"
-                              disabled={isSubmittingDisposition || isViewer}
-                              className="w-full py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs rounded transition-colors disabled:opacity-40"
-                            >
-                              Review & Confirm Disposition
-                            </button>
-                          </>
-                        )}
-                      </form>
-
-                      {/* Disposition Confirmation Modal */}
-                      {showConfirmModal && (
-                        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-                          <div className="bg-slate-900 border border-sky-500/30 rounded-xl p-5 max-w-md w-full space-y-4 shadow-2xl">
-                            <div className="flex justify-between items-center pb-2 border-b border-slate-800">
-                              <h3 className="text-xs font-bold uppercase tracking-wider text-sky-400 flex items-center gap-2">
-                                <ShieldAlert className="w-4 h-4 text-sky-400" />
-                                Confirm Analyst Disposition
-                              </h3>
-                              <button onClick={() => setShowConfirmModal(false)} className="text-slate-400 hover:text-white">
-                                <X className="w-4 h-4" />
-                              </button>
-                            </div>
-
-                            <div className="space-y-2 text-xs font-mono">
-                              <div className="flex justify-between p-2 rounded bg-slate-950 border border-slate-800">
-                                <span className="text-slate-400">Target Case ID:</span>
-                                <span className="text-slate-200 font-bold">{selectedCase?.case_id}</span>
-                              </div>
-                              <div className="flex justify-between p-2 rounded bg-slate-950 border border-slate-800">
-                                <span className="text-slate-400">Action Code:</span>
-                                <span className="text-sky-300 font-bold">{selectedDispositionCode}</span>
-                              </div>
-                              {analystNotes && (
-                                <div className="p-2 rounded bg-slate-950 border border-slate-800 space-y-1">
-                                  <span className="text-slate-400 text-[10px] block">Analyst Rationale:</span>
-                                  <p className="text-slate-200 text-[11px] leading-snug">{analystNotes}</p>
-                                </div>
-                              )}
-                            </div>
-
-                            <div className="p-3 rounded bg-amber-950/40 border border-amber-500/40 text-[10px] text-amber-200 space-y-1">
-                              <div className="flex items-center gap-1.5 font-bold uppercase">
-                                <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
-                                Human Authorization Boundary
-                              </div>
-                              <p className="text-slate-300 leading-tight">
-                                This disposition will transition case state and persist an immutable audit event to PostgreSQL. AI components cannot perform financial actions autonomously.
-                              </p>
-                            </div>
-
-                            <div className="flex gap-2 pt-2">
-                              <button
-                                onClick={() => setShowConfirmModal(false)}
-                                className="flex-1 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold rounded"
-                              >
-                                Cancel
-                              </button>
-                              <button
-                                onClick={async () => {
-                                  setShowConfirmModal(false);
-                                  setIsSubmittingDisposition(true);
-                                  setDispositionResponse(null);
-                                  const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
-                                  try {
-                                    const res = await fetch(`${API_BASE}/cases/${selectedCase.case_id}/disposition`, {
-                                      method: 'POST',
-                                      headers: { 'Content-Type': 'application/json' },
-                                      body: JSON.stringify({
-                                        case_id: selectedCase.case_id,
-                                        action_code: selectedDispositionCode,
-                                        analyst_notes: analystNotes,
-                                        analyst_id: "ANALYST-001",
-                                        analyst_role: "COMPLIANCE_ANALYST",
-                                        risk_acknowledged: riskAcknowledged
-                                      })
-                                    });
-                                    const data = await res.json();
-                                    setDispositionResponse(data);
-                                    if (data.ok) {
-                                      fetchCaseHistory(selectedCase.case_id);
-                                    }
-                                  } catch (err) {
-                                    setDispositionResponse({ ok: false, error: 'Network error submitting disposition.' });
-                                  } finally {
-                                    setIsSubmittingDisposition(false);
-                                  }
-                                }}
-                                className="flex-1 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded"
-                              >
-                                Confirm & Submit Disposition
-                              </button>
-                            </div>
-                          </div>
-                        </div>
-                      )}
-
-
-                      {dispositionResponse && (
-                        <div className={twMerge(
-                          "p-2 rounded border text-[10px]",
-                          dispositionResponse.ok ? "bg-emerald-950/60 border-emerald-800 text-emerald-300" : "bg-rose-950/60 border-rose-800 text-rose-300"
-                        )}>
-                          {dispositionResponse.ok ? (
-                            <div>
-                              <strong>✓ Disposition Executed & State Persisted</strong>
-                              <p className="mt-0.5 leading-snug">{dispositionResponse.message}</p>
-                            </div>
-                          ) : (
-                            <div>
-                              <strong>✗ Disposition Rejected</strong>
-                              <p className="mt-0.5 leading-snug">{dispositionResponse.error || 'Validation error.'}</p>
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Analyst Audit History Feed (Phase 6 Persistent Audit Log) */}
-                  {caseHistory?.audit_history && caseHistory.audit_history.length > 0 && (
-                    <div className="pt-3 border-t border-indigo-900/40 space-y-2">
-                      <span className="text-[9px] font-mono font-bold text-indigo-400 uppercase tracking-wider block">
-                        Analyst Audit History Feed ({caseHistory.audit_history.length})
-                      </span>
-                      <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
-                        {caseHistory.audit_history.map((item) => (
-                          <div key={item.audit_id} className="p-2 rounded-lg bg-slate-900/80 border border-indigo-900/50 space-y-1 text-xs">
-                            <div className="flex items-center justify-between">
-                              <span className="text-[9px] font-mono font-bold text-indigo-300">
-                                {item.analyst_id} • {item.analyst_role}
-                              </span>
-                              <span className="text-[8px] font-mono text-slate-400">
-                                {new Date(item.timestamp).toLocaleTimeString()}
-                              </span>
-                            </div>
-
-                            <div className="flex items-center gap-1.5">
-                              <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-indigo-950 text-indigo-200 border border-indigo-800 font-bold uppercase">
-                                {item.action_code}
-                              </span>
-                              <span className="text-[9px] font-mono text-slate-400">
-                                {item.previous_case_status} → <strong className="text-teal-300">{item.new_case_status}</strong>
-                              </span>
-                            </div>
-
-                            {item.analyst_notes && (
-                              <p className="text-[10px] text-slate-300 italic bg-slate-950/40 p-1.5 rounded border border-slate-800 leading-snug">
-                                "{item.analyst_notes}"
-                              </p>
-                            )}
-
-                            {item.risk_acknowledged && (
-                              <span className="inline-block text-[8px] font-mono px-1 py-0.2 rounded bg-amber-950 text-amber-300 border border-amber-800">
-                                Risk Ack: CONFIRMED
-                              </span>
-                            )}
-
-                            {/* Traceability Chips */}
-                            {item.traceability_chain && (
-                              <div className="flex flex-wrap gap-1 pt-1 border-t border-slate-800/60">
-                                {item.traceability_chain.supporting_evidence_ids?.map((evId) => (
-                                  <span key={evId} title="Evidence ID" className="text-[8px] font-mono px-1 py-0.2 rounded bg-slate-800 text-sky-400 border border-slate-700">
-                                    {evId}
-                                  </span>
-                                ))}
-                                {item.traceability_chain.supporting_context_finding_ids?.map((ctxId) => (
-                                  <span key={ctxId} title="Context Finding ID" className="text-[8px] font-mono px-1 py-0.2 rounded bg-indigo-950 text-indigo-300 border border-indigo-800/60">
-                                    {ctxId}
-                                  </span>
-                                ))}
-                                {item.traceability_chain.supporting_context_pattern_ids?.map((patId) => (
-                                  <span key={patId} title="Matched Context Pattern" className="text-[8px] font-mono px-1 py-0.2 rounded bg-amber-950/80 text-amber-300 border border-amber-800/60">
-                                    PAT:{patId}
-                                  </span>
-                                ))}
-                                {item.traceability_chain.supporting_regulatory_ids?.map((regId) => (
-                                  <span key={regId} title="Regulatory Indicator ID" className="text-[8px] font-mono px-1 py-0.2 rounded bg-purple-950 text-purple-300 border border-purple-800/60">
-                                    {regId}
-                                  </span>
-                                ))}
-                              </div>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </section>
-              )}
-
-              {/* Action Decision Terminal */}
-              <section className="bg-card border border-border/80 rounded-xl p-4">
-                <h3 className="text-[10px] font-semibold uppercase tracking-wider text-slate-400 mb-3">Decision Terminal</h3>
-                <div className="grid grid-cols-2 gap-2">
-                  <button onClick={() => handleAction('freeze')} disabled={isViewer} className="py-2 px-3 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-40">
-                    Freeze Account
-                  </button>
-                  <button onClick={() => handleAction('monitor')} disabled={isViewer} className="py-2 px-3 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-40">
-                    Monitor Account
-                  </button>
-                  <button onClick={() => handleAction('flag')} disabled={isViewer} className="py-2 px-3 bg-amber-600 hover:bg-amber-500 text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-40">
-                    Escalate Case
-                  </button>
-                  <button onClick={() => handleAction('alert')} disabled={isViewer} className="py-2 px-3 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-40">
-                    Alert Police
-                  </button>
-                  <button onClick={() => handleAction('close')} disabled={isViewer} className="py-2 px-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-40">
-                    Close (Resolved)
-                  </button>
-                  <button onClick={() => handleAction('close_fp')} disabled={isViewer} className="py-2 px-3 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg text-xs font-semibold transition-colors disabled:opacity-40">
-                    Close (False Pos)
-                  </button>
-                </div>
-              </section>
-
-              {/* Graph Summary */}
-              {selectedCase && (
-                <section className="grid grid-cols-2 gap-3">
-                  <div className="bg-muted/30 p-3 rounded-xl border border-border/80">
-                    <span className="text-[9px] uppercase font-semibold text-slate-400 block">Chain Depth</span>
-                    <span className="text-sm font-mono font-bold text-slate-100">{selectedCase.chain.length} Hops</span>
-                  </div>
-                  <div className="bg-muted/30 p-3 rounded-xl border border-border/80">
-                    <span className="text-[9px] uppercase font-semibold text-slate-400 block">Recovery %</span>
-                    <span className="text-sm font-mono font-bold text-emerald-400">{recoveryPercent}%</span>
-                  </div>
-                </section>
-              )}
-
-              {/* Action Timeline */}
-              <section className="pb-6">
-                <h3 className="text-[10px] font-semibold uppercase tracking-wider text-slate-400 mb-3">Action History</h3>
-                <div className="space-y-3 border-l border-border/80 ml-2 pl-4">
-                  {actions.length > 0 ? actions.map((action) => (
-                    <div key={action.action_id} className="relative">
-                      <span className="absolute -left-[21px] top-1.5 w-2.5 h-2.5 rounded-full bg-sky-400 border-2 border-card" />
-                      <div>
-                        <div className="flex justify-between items-center mb-0.5">
-                          <span className="text-xs font-mono font-semibold text-sky-400 uppercase">
-                            {action.action_type.replace(/_/g, ' ')}
-                          </span>
-                          <span className="text-[9px] font-mono text-slate-400">
-                            {new Date(action.timestamp).toLocaleTimeString()}
-                          </span>
-                        </div>
-                        <p className="text-[11px] text-slate-300">
-                          Target: <span className="font-mono font-semibold">
-                            {isViewer ? maskAccount(action.target) : action.target}
-                          </span>
-                        </p>
-                        <p className="text-[9px] text-slate-400">Actor Role: {action.actor_role}</p>
-                      </div>
-                    </div>
-                  )) : (
-                    <p className="text-xs text-slate-400 italic">No investigative actions recorded.</p>
-                  )}
-                </div>
-              </section>
-
+            {/* Why This Matters */}
+            <div className="p-4 rounded-xl border border-sky-500/20 bg-sky-500/5 space-y-1.5">
+              <div className="text-[10px] font-mono font-bold text-sky-400 uppercase tracking-widest flex items-center gap-1.5">
+                <Activity className="w-3.5 h-3.5" /> WHY THIS TRANSACTION MATTERS
+              </div>
+              <p className="text-xs text-slate-300 leading-relaxed">
+                "This transaction is part of a high-risk multi-hop fund flow involving a newly observed receiver and abnormal transaction behavior. Its position at Hop 2 of 5 within the active mule chain increases investigative relevance."
+              </p>
             </div>
           </div>
         </div>
+
+        {/* ── 4. FOOTER: AUTOMATION STATUS & OPERATOR FREEZE CONTROL ──────── */}
+        <footer className="px-6 py-4 border-t border-[#1E293B] bg-[#060B15] shrink-0 flex items-center justify-between">
+          {/* Automation Active Indicator */}
+          {isAutomationOn ? (
+            <div className="flex items-center gap-2 text-xs font-mono text-slate-400">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+              <span className="font-bold text-emerald-400">AUTOMATION ACTIVE</span>
+              <span className="text-slate-600">·</span>
+              <span className="text-slate-500">NON-FREEZE ACTIONS EXECUTED AUTONOMOUSLY BY POLICY ENGINE</span>
+            </div>
+          ) : (
+            <div className="text-xs font-mono text-amber-400 font-bold">
+              MANUAL OPERATOR MODE
+            </div>
+          )}
+
+          {/* Action Controls: FREEZE / PERSISTENT FROZEN STATE */}
+          <div className="flex items-center gap-3">
+            {freezeError && (
+              <span className="text-xs font-mono text-rose-400 font-bold">
+                ⚠ {freezeError}
+              </span>
+            )}
+
+            {isAccountFrozen ? (
+              <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-rose-500/30 bg-rose-500/10 text-xs font-mono">
+                <span className="w-2 h-2 rounded-full bg-rose-400" />
+                <span className="font-bold text-rose-400">ACCOUNT FROZEN</span>
+                <span className="text-slate-600">·</span>
+                <span className="text-slate-400">Action completed by Human Operator</span>
+              </div>
+            ) : isSuspicious && (
+              <button
+                onClick={() => handleAction('freeze')}
+                disabled={isViewer || freezeLoading}
+                className="px-4 py-2 rounded-lg text-xs font-mono font-bold bg-rose-600 hover:bg-rose-500 text-white border border-rose-400 shadow-lg transition-all flex items-center gap-2 disabled:opacity-40"
+              >
+                <Lock className="w-3.5 h-3.5" />
+                <span>{freezeLoading ? 'PERSISTING FREEZE...' : 'FREEZE ACCOUNT'}</span>
+                <span className="text-[9px] px-1.5 py-0.5 rounded bg-black/30 text-rose-200">HUMAN OPERATOR APPROVAL REQUIRED</span>
+              </button>
+            )}
+
+            <button
+              onClick={onClose}
+              className="px-4 py-2 rounded-lg text-xs font-semibold bg-[#1E293B] hover:bg-[#334155] text-slate-200 transition-colors"
+            >
+              Close (Esc)
+            </button>
+          </div>
+        </footer>
       </div>
     </div>
   );
 };
 
 export default InvestigationSidebar;
-

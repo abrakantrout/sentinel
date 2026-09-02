@@ -1,5 +1,9 @@
 import React, { useMemo, useRef, useState, useCallback, useEffect } from 'react';
 import GraphCanvas from './GraphCanvas';
+import TransactionDetailModal from './TransactionDetailModal';
+import EntityDetailModal from './EntityDetailModal';
+import InvestigationBriefModal from './InvestigationBriefModal';
+import AgentReportModal from './AgentReportModal';
 import './GraphModule.css';
 
 import { getRole } from '../../roleStore';
@@ -7,8 +11,10 @@ import {
   ZoomIn, ZoomOut, Maximize2, RotateCcw, Crosshair, 
   Search, Layers, X, Zap, Map, GitCommit,
   AlertTriangle, Activity, TrendingUp, Shield,
-  ChevronRight, Clock, Eye
+  ChevronRight, Clock, Eye, Brain, Cpu, WifiOff, Timer
 } from 'lucide-react';
+
+const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
 
 // ── SENTINEL TERMINAL DESIGN SYSTEM (from Stitch) ──────────────────────────
 const TOPOLOGY_LABELS = {
@@ -84,120 +90,45 @@ const TimelineBar = ({ edges }) => {
   );
 };
 
-// ── INTELLIGENCE PANEL ───────────────────────────────────────────────────────
-const IntelligencePanel = ({ caseData, nodes, edges, onTrace, isTracing, traceProgress }) => {
-  const muleCount = nodes.filter(n => n.node_type === 'mule' || n.account_type === 'MULE').length;
-  const exitCount = nodes.filter(n => ['cashout','crypto','merchant'].includes(n.node_type) || n.account_type === 'DESTINATION').length;
-  const totalValue = edges.reduce((s, e) => s + Number(e.amount || 0), 0);
-  const suspiciousCount = edges.filter(e => e.suspicious).length;
-  const maxHops = Math.max(...nodes.map(n => Number(n.layer || 0)), 1);
-  const riskScore = Number(caseData?.risk_score || caseData?.risk_level || 91);
+// ── AI STATE MACHINE CONSTANTS ────────────────────────────────────────────────
+const AI_STATUS = { IDLE: 'idle', LOADING: 'loading', READY: 'ready', UNAVAILABLE: 'unavailable', TIMEOUT: 'timeout', ERROR: 'error', NO_DATA: 'no_data' };
 
-  const layeringPct = Math.min(100, Math.round((maxHops / 5) * 100) + 40);
-  const muleCascadePct = Math.min(100, Math.round((muleCount / Math.max(nodes.length, 1)) * 100) + 30);
-  const rapidPct = Math.min(100, suspiciousCount > 0 ? 78 : 40);
+// ── AI SECTION SUB-COMPONENTS ─────────────────────────────────────────────────
+const AISectionLabel = ({ children }) => (
+  <div className="text-[9px] font-['JetBrains_Mono'] font-semibold text-slate-600 uppercase tracking-widest mb-1.5">{children}</div>
+);
 
+const AIConfidencePip = ({ value }) => {
+  const pct = Math.round((value || 0) * 100);
+  const color = pct >= 75 ? '#34D399' : pct >= 50 ? '#FBBF24' : '#F87171';
   return (
-    <div className="w-72 bg-[#0F172A] border-l border-[#1E293B] flex flex-col shrink-0 overflow-y-auto">
-      
-      {/* CASE RISK */}
-      <div className="px-4 py-3 border-b border-[#1E293B]">
-        <div className="text-[10px] font-['Hanken_Grotesk'] font-semibold text-slate-500 uppercase tracking-widest mb-2">INVESTIGATION INTELLIGENCE</div>
-        <div className="flex items-center justify-between">
-          <div>
-            <div className="flex items-center gap-2 mb-1">
-              <div className="px-2 py-0.5 text-[10px] font-['JetBrains_Mono'] font-bold rounded-sm"
-                style={{ background: 'rgba(239,68,68,0.15)', border: '1px solid rgba(239,68,68,0.5)', color: '#EF4444' }}>
-                CRITICAL
-              </div>
-            </div>
-            <div className="font-['JetBrains_Mono'] text-2xl font-bold text-[#EF4444]">
-              {riskScore}<span className="text-sm text-slate-500"> / 100</span>
-            </div>
-            <div className="text-[10px] font-['Hanken_Grotesk'] text-slate-500">CASE RISK SCORE</div>
-          </div>
-          {/* Mini risk dial */}
-          <svg width="56" height="56" viewBox="0 0 56 56">
-            <circle cx="28" cy="28" r="22" fill="none" stroke="#1E293B" strokeWidth="4" />
-            <circle cx="28" cy="28" r="22" fill="none" stroke="#EF4444" strokeWidth="4"
-              strokeDasharray={`${(riskScore / 100) * 138} 138`}
-              strokeLinecap="round"
-              transform="rotate(-90 28 28)" />
-            <text x="28" y="33" textAnchor="middle" fontSize="11" fontFamily="JetBrains Mono" fill="#F8FAFC" fontWeight="700">{riskScore}</text>
-          </svg>
-        </div>
-      </div>
+    <span className="font-['JetBrains_Mono'] text-[10px] font-bold px-1.5 py-0.5 rounded-sm ml-1.5"
+      style={{ background: `${color}18`, border: `1px solid ${color}40`, color }}>
+      {pct}%
+    </span>
+  );
+};
 
-      {/* WHY THIS CASE MATTERS */}
-      <div className="px-4 py-3 border-b border-[#1E293B]">
-        <div className="text-[10px] font-['Hanken_Grotesk'] font-semibold text-slate-500 uppercase tracking-widest mb-2.5">WHY THIS CASE MATTERS</div>
-        <div className="space-y-2">
-          {[
-            { n: 1, label: 'Large inflow', detail: `₹${(totalValue / 100000).toFixed(1)}L received across victim accounts`, color: '#EF4444' },
-            { n: 2, label: 'Rapid layering', detail: `Funds moved through ${maxHops} hop${maxHops > 1 ? 's' : ''} in layered structure`, color: '#F59E0B' },
-            { n: 3, label: 'Mule cascade', detail: `${muleCount} mule account${muleCount !== 1 ? 's' : ''} identified in the network`, color: '#38BDF8' },
-            { n: 4, label: 'Fan-out exits', detail: `${exitCount} downstream exit point${exitCount !== 1 ? 's' : ''} detected`, color: '#7C3AED' }
-          ].map(item => (
-            <div key={item.n} className="flex gap-2.5 items-start">
-              <div className="w-5 h-5 rounded-sm flex items-center justify-center shrink-0 text-[10px] font-['JetBrains_Mono'] font-bold"
-                style={{ background: `${item.color}18`, border: `1px solid ${item.color}40`, color: item.color }}>
-                {item.n}
-              </div>
-              <div>
-                <div className="text-[11px] font-['Hanken_Grotesk'] font-semibold text-slate-200">{item.label}</div>
-                <div className="text-[10px] font-['Hanken_Grotesk'] text-slate-500">{item.detail}</div>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* PATTERN SIGNALS */}
-      <div className="px-4 py-3 border-b border-[#1E293B]">
-        <div className="text-[10px] font-['Hanken_Grotesk'] font-semibold text-slate-500 uppercase tracking-widest mb-2.5">PATTERN SIGNALS</div>
-        <PatternBar label="Layering" value={layeringPct} color="#38BDF8" />
-        <PatternBar label="Mule Cascade" value={muleCascadePct} color="#EF4444" />
-        <PatternBar label="Rapid Pass-through" value={rapidPct} color="#F59E0B" />
-      </div>
-
-      {/* AI INSIGHT */}
-      <div className="px-4 py-3 border-b border-[#1E293B]">
-        <div className="flex items-center gap-2 mb-2">
-          <div className="text-[10px] font-['Hanken_Grotesk'] font-semibold text-slate-500 uppercase tracking-widest">AI INSIGHT</div>
-          <div className="px-1.5 py-0.5 text-[9px] font-['JetBrains_Mono'] rounded-sm"
-            style={{ background: 'rgba(56,189,248,0.1)', border: '1px solid rgba(56,189,248,0.3)', color: '#38BDF8' }}>
-            Confidence {muleCascadePct}%
-          </div>
-        </div>
-        <p className="text-[11px] font-['Hanken_Grotesk'] text-slate-400 leading-relaxed">
-          Funds moved through a {maxHops}-hop layering chain involving {muleCount > 0 ? `${muleCount} mule accounts` : 'multiple intermediary accounts'}
-          {exitCount > 0 ? ` before redistribution through ${exitCount} exit point${exitCount > 1 ? 's' : ''}` : ''}.
-          {suspiciousCount > 0 ? ` ${suspiciousCount} transaction${suspiciousCount > 1 ? 's' : ''} flagged as suspicious.` : ''}
-        </p>
-      </div>
-
-      {/* NEXT ACTION */}
-      <div className="px-4 py-3 space-y-2">
-        <div className="text-[10px] font-['Hanken_Grotesk'] font-semibold text-slate-500 uppercase tracking-widest mb-2">NEXT ACTION</div>
-        <button
-          onClick={onTrace}
-          className={`w-full py-2.5 px-3 text-[11px] font-['Hanken_Grotesk'] font-semibold rounded transition-all flex items-center justify-center gap-2 ${
-            isTracing
-              ? 'bg-rose-950 text-rose-300 border border-rose-600/60 animate-pulse'
-              : 'bg-[#EF4444] hover:bg-[#DC2626] text-white border border-[#EF4444]'
-          }`}
-        >
-          <GitCommit className="w-3.5 h-3.5" />
-          {isTracing ? `TRACING HOP ${traceProgress?.step || 1}/${traceProgress?.totalSteps || '...'}` : 'TRACE SUSPICIOUS PATH'}
-        </button>
-        <button className="w-full py-2 px-3 text-[11px] font-['Hanken_Grotesk'] font-semibold rounded border border-[#1E293B] text-slate-400 hover:border-[#38BDF8] hover:text-[#38BDF8] transition-all flex items-center justify-center gap-2">
-          <Eye className="w-3.5 h-3.5" />
-          GENERATE REPORT
-        </button>
-      </div>
+const AIStatusBlock = ({ status, errorDetail }) => {
+  const configs = {
+    [AI_STATUS.LOADING]:     { icon: <Cpu className="w-4 h-4 text-sky-400 animate-spin" />, label: 'ANALYZING INVESTIGATION...', sub: 'Qwen 3:8B processing evidence', color: '#38BDF8' },
+    [AI_STATUS.UNAVAILABLE]: { icon: <WifiOff className="w-4 h-4 text-slate-500" />, label: 'LOCAL AI UNAVAILABLE', sub: 'Start Ollama and ensure qwen3:8b is available', color: '#64748B' },
+    [AI_STATUS.TIMEOUT]:     { icon: <Timer className="w-4 h-4 text-amber-400" />, label: 'AI ANALYSIS TIMED OUT', sub: 'Model took too long to respond', color: '#FBBF24' },
+    [AI_STATUS.ERROR]:       { icon: <AlertTriangle className="w-4 h-4 text-red-400" />, label: 'INTELLIGENCE ANALYSIS FAILED', sub: errorDetail || 'Unexpected error', color: '#EF4444' },
+    [AI_STATUS.NO_DATA]:     { icon: <Shield className="w-4 h-4 text-slate-500" />, label: 'INSUFFICIENT INVESTIGATION DATA', sub: 'Case data not available for analysis', color: '#64748B' },
+  };
+  const cfg = configs[status];
+  if (!cfg) return null;
+  return (
+    <div className="flex flex-col items-center justify-center py-5 gap-2 text-center">
+      {cfg.icon}
+      <div className="font-['JetBrains_Mono'] text-[10px] font-bold" style={{ color: cfg.color }}>{cfg.label}</div>
+      <div className="text-[10px] font-['Hanken_Grotesk'] text-slate-600 leading-relaxed px-2">{cfg.sub}</div>
     </div>
   );
 };
+
+
 
 // ── COMPACT LEGEND ───────────────────────────────────────────────────────────
 const CompactLegend = ({ isOpen, onToggle }) => (
@@ -290,7 +221,62 @@ const Minimap = ({ nodes, edges }) => (
 const GraphModule = ({ caseData, actions = [], onAction, connectionStatus, newTransactionEvent }) => {
   const [selectedNode, setSelectedNode] = useState(null);
   const [selectedEdge, setSelectedEdge] = useState(null);
+  const [briefModalOpen, setBriefModalOpen] = useState(false);
+  const [selectedAgentReport, setSelectedAgentReport] = useState(null);
   const [processingNodes, setProcessingNodes] = useState({});
+
+  // ── AI State (Lifted to GraphModule level) ────────────────────────────────
+  const [aiStatus, setAiStatus] = useState(AI_STATUS.IDLE);
+  const [aiResult, setAiResult] = useState(null); // cached for current session
+  const [aiError, setAiError] = useState(null);
+
+  const handleAnalyzeCase = useCallback(async (e) => {
+    if (e && typeof e.preventDefault === 'function') e.preventDefault();
+    if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
+    if (aiStatus === AI_STATUS.LOADING) return;
+    setAiStatus(AI_STATUS.LOADING);
+    setAiError(null);
+    try {
+      const endpoint = import.meta.env.VITE_API_URL 
+        ? `${import.meta.env.VITE_API_URL.replace(/\/$/, '')}/intelligence/analyze`
+        : '/intelligence/analyze';
+      const resp = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ case_id: caseData?.case_id }),
+        signal: AbortSignal.timeout(70000),
+      });
+      if (!resp.ok) {
+        let errText = `HTTP ${resp.status}`;
+        try {
+          const errJson = await resp.json();
+          if (errJson.detail) errText = typeof errJson.detail === 'string' ? errJson.detail : JSON.stringify(errJson.detail);
+        } catch {}
+        throw new Error(errText);
+      }
+      const data = await resp.json();
+      const s = data?.status || 'error';
+      setAiResult(data);
+      setAiStatus(
+        s === 'ready' ? AI_STATUS.READY :
+        s === 'unavailable' ? AI_STATUS.UNAVAILABLE :
+        s === 'timeout' ? AI_STATUS.TIMEOUT :
+        s === 'no_data' ? AI_STATUS.NO_DATA : AI_STATUS.ERROR
+      );
+      setAiError(data?.error_detail || null);
+    } catch (err) {
+      setAiStatus(AI_STATUS.ERROR);
+      setAiError(err?.message || String(err));
+    }
+  }, [caseData?.case_id, aiStatus]);
+
+  const handleOpenBrief = useCallback((e) => {
+    if (e && typeof e.preventDefault === 'function') e.preventDefault();
+    setBriefModalOpen(true);
+    if (aiStatus === AI_STATUS.IDLE) {
+      handleAnalyzeCase();
+    }
+  }, [aiStatus, handleAnalyzeCase]);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [isTracing, setIsTracing] = useState(false);
@@ -447,7 +433,7 @@ const GraphModule = ({ caseData, actions = [], onAction, connectionStatus, newTr
                 value={searchQuery}
                 onChange={e => setSearchQuery(e.target.value)}
                 placeholder="Search entity or TX..."
-                className="w-56 py-2 pl-8 pr-3 text-[11px] font-['JetBrains_Mono'] rounded outline-none placeholder-slate-600 transition-all"
+                className="w-52 py-2 pl-8 pr-3 text-[11px] font-['JetBrains_Mono'] rounded outline-none placeholder-slate-600 transition-all"
                 style={{
                   background: '#020617',
                   border: '1px solid #1E293B',
@@ -470,6 +456,19 @@ const GraphModule = ({ caseData, actions = [], onAction, connectionStatus, newTr
               <GitCommit className="w-3.5 h-3.5" />
               {isTracing ? `HOP ${traceProgress?.step || 1}/${traceProgress?.totalSteps || '?'}` : 'TRACE PATH'}
             </button>
+
+            <button
+              onClick={handleOpenBrief}
+              className="px-3.5 py-2 rounded text-[11px] font-['JetBrains_Mono'] font-bold flex items-center gap-1.5 border transition-all shadow-lg"
+              style={{
+                background: 'rgba(56, 189, 248, 0.12)',
+                border: '1px solid rgba(56, 189, 248, 0.4)',
+                color: '#38BDF8'
+              }}
+            >
+              <Brain className="w-3.5 h-3.5 text-sky-400" />
+              <span>ANALYZE BRIEF (QWEN)</span>
+            </button>
           </div>
 
           {/* TOP-RIGHT: Zoom controls pill */}
@@ -487,6 +486,16 @@ const GraphModule = ({ caseData, actions = [], onAction, connectionStatus, newTr
               </button>
             ))}
           </div>
+
+          {/* CENTERED TRANSACTION DETAIL MODAL */}
+          {selectedEdge && (
+            <TransactionDetailModal edge={selectedEdge} onClose={() => setSelectedEdge(null)} />
+          )}
+
+          {/* CENTERED ENTITY DETAIL MODAL */}
+          {selectedNode && (
+            <EntityDetailModal node={selectedNode} onClose={() => setSelectedNode(null)} />
+          )}
 
           {/* CYTOSCAPE CANVAS */}
           <GraphCanvas
@@ -508,69 +517,25 @@ const GraphModule = ({ caseData, actions = [], onAction, connectionStatus, newTr
             <Minimap nodes={rawNodes} edges={rawEdges} />
           </div>
 
-          {/* NODE / EDGE DETAIL OVERLAY (BOTTOM ANCHORED) */}
-          {(selectedNode || selectedEdge) && (
-            <div className="absolute bottom-16 left-1/2 -translate-x-1/2 z-30 flex items-center gap-6 px-5 py-3 rounded border border-[#1E293B] shadow-2xl"
-              style={{ background: '#0F172A', backdropFilter: 'blur(12px)' }}>
-              {selectedNode && (
-                <>
-                  <div>
-                    <div className="text-[9px] font-['Hanken_Grotesk'] text-slate-500 uppercase tracking-wider mb-0.5">ENTITY</div>
-                    <div className="font-['JetBrains_Mono'] text-[12px] font-bold text-[#38BDF8]">{selectedNode.accountId || selectedNode.id}</div>
-                  </div>
-                  <div>
-                    <div className="text-[9px] font-['Hanken_Grotesk'] text-slate-500 uppercase tracking-wider mb-0.5">TYPE</div>
-                    <div className="font-['JetBrains_Mono'] text-[11px] text-purple-400 uppercase">{selectedNode.node_type || 'ACCOUNT'}</div>
-                  </div>
-                  <div>
-                    <div className="text-[9px] font-['Hanken_Grotesk'] text-slate-500 uppercase tracking-wider mb-0.5">HOP</div>
-                    <div className="font-['JetBrains_Mono'] text-[11px] text-slate-200">Layer {selectedNode.layer || 0}</div>
-                  </div>
-                  <div>
-                    <div className="text-[9px] font-['Hanken_Grotesk'] text-slate-500 uppercase tracking-wider mb-0.5">INBOUND</div>
-                    <div className="font-['JetBrains_Mono'] text-[11px] text-emerald-400">₹{Number(selectedNode.total_inbound||0).toLocaleString('en-IN')}</div>
-                  </div>
-                  <div>
-                    <div className="text-[9px] font-['Hanken_Grotesk'] text-slate-500 uppercase tracking-wider mb-0.5">OUTBOUND</div>
-                    <div className="font-['JetBrains_Mono'] text-[11px] text-red-400">₹{Number(selectedNode.total_outbound||0).toLocaleString('en-IN')}</div>
-                  </div>
-                  <div>
-                    <div className="text-[9px] font-['Hanken_Grotesk'] text-slate-500 uppercase tracking-wider mb-0.5">STATUS</div>
-                    <div className="font-['JetBrains_Mono'] text-[11px] text-amber-400 uppercase">{selectedNode.status || 'ACTIVE'}</div>
-                  </div>
-                </>
-              )}
-              {selectedEdge && (
-                <>
-                  <div>
-                    <div className="text-[9px] font-['Hanken_Grotesk'] text-slate-500 uppercase tracking-wider mb-0.5">TRANSACTION</div>
-                    <div className="font-['JetBrains_Mono'] text-[12px] font-bold text-[#38BDF8]">{selectedEdge.tx_id || selectedEdge.id}</div>
-                  </div>
-                  <div>
-                    <div className="text-[9px] font-['Hanken_Grotesk'] text-slate-500 uppercase tracking-wider mb-0.5">AMOUNT</div>
-                    <div className="font-['JetBrains_Mono'] text-[12px] font-bold text-emerald-400">₹{Number(selectedEdge.amount||0).toLocaleString('en-IN')}</div>
-                  </div>
-                  <div>
-                    <div className="text-[9px] font-['Hanken_Grotesk'] text-slate-500 uppercase tracking-wider mb-0.5">HOP</div>
-                    <div className="font-['JetBrains_Mono'] text-[11px] text-sky-300">H{selectedEdge.hop_number || 1}/{selectedEdge.total_hops || 1}</div>
-                  </div>
-                  <div>
-                    <div className="text-[9px] font-['Hanken_Grotesk'] text-slate-500 uppercase tracking-wider mb-0.5">CHANNEL</div>
-                    <div className="font-['JetBrains_Mono'] text-[11px] text-slate-200">{selectedEdge.channel || 'UPI'}</div>
-                  </div>
-                  <div>
-                    <div className="text-[9px] font-['Hanken_Grotesk'] text-slate-500 uppercase tracking-wider mb-0.5">FLAG</div>
-                    <div className={`font-['JetBrains_Mono'] text-[11px] font-bold ${selectedEdge.suspicious ? 'text-red-400' : 'text-emerald-400'}`}>
-                      {selectedEdge.suspicious ? 'SUSPICIOUS' : 'NORMAL'}
-                    </div>
-                  </div>
-                </>
-              )}
-              <button onClick={() => { setSelectedNode(null); setSelectedEdge(null); }}
-                className="p-1 text-slate-600 hover:text-slate-300 ml-2">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
+          {/* CENTERED INVESTIGATION BRIEF MODAL (QWEN AI) */}
+          {briefModalOpen && (
+            <InvestigationBriefModal
+              caseData={caseData}
+              onClose={() => setBriefModalOpen(false)}
+              onAnalyze={handleAnalyzeCase}
+              aiStatus={aiStatus}
+              aiResult={aiResult}
+              aiError={aiError}
+              onOpenReport={(rep) => setSelectedAgentReport(rep)}
+            />
+          )}
+
+          {/* CENTERED DETAILED AGENT REPORT MODAL */}
+          {selectedAgentReport && (
+            <AgentReportModal
+              report={selectedAgentReport}
+              onClose={() => setSelectedAgentReport(null)}
+            />
           )}
 
           {/* BOTTOM TIMELINE */}
@@ -578,16 +543,6 @@ const GraphModule = ({ caseData, actions = [], onAction, connectionStatus, newTr
             <TimelineBar edges={rawEdges} />
           </div>
         </div>
-
-        {/* INTELLIGENCE PANEL */}
-        <IntelligencePanel
-          caseData={caseData}
-          nodes={rawNodes}
-          edges={rawEdges}
-          onTrace={handleTrace}
-          isTracing={isTracing}
-          traceProgress={traceProgress}
-        />
       </div>
     </div>
   );

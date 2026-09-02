@@ -30,10 +30,13 @@ const ActionTakenToast = () => {
       const isExecuted = !isFailedFreeze && (execStatus === 'SUCCESS' || execStatus === 'EXECUTED') && !isFreeze;
       const isOperatorFreezeExecuted = !isFailedFreeze && isFreeze && isHumanOperator && (execStatus === 'SUCCESS' || execStatus === 'EXECUTED');
 
-      let title = '⚡ AUTOMATED ACTION EXECUTED';
+      // Requirement: Do NOT show a temporary success toast for FREEZE. The workstation state is the confirmation.
       if (isOperatorFreezeExecuted) {
-        title = '🔒 ACCOUNT FROZEN';
-      } else if (isOperatorReq) {
+        return;
+      }
+
+      let title = '⚡ AUTOMATED ACTION EXECUTED';
+      if (isOperatorReq) {
         title = '🔔 OPERATOR ACTION REQUIRED';
       } else if (isModeOff) {
         title = '○ AUTOMATION OFF';

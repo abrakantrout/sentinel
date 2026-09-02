@@ -12,10 +12,25 @@ export default defineConfig({
   },
   server: {
     proxy: {
+      '/intelligence': 'http://localhost:8000',
       '/automation-mode': 'http://localhost:8000',
-      '/cases': 'http://localhost:8000',
-      '/transactions': 'http://localhost:8000',
       '/action': 'http://localhost:8000',
+      '/cases': {
+        target: 'http://localhost:8000',
+        bypass: (req) => {
+          if (req.headers.accept && req.headers.accept.includes('html')) {
+            return '/index.html'
+          }
+        }
+      },
+      '/transactions': {
+        target: 'http://localhost:8000',
+        bypass: (req) => {
+          if (req.headers.accept && req.headers.accept.includes('html')) {
+            return '/index.html'
+          }
+        }
+      },
       '/ws': {
         target: 'ws://localhost:8000',
         ws: true
@@ -23,4 +38,3 @@ export default defineConfig({
     }
   }
 })
-
