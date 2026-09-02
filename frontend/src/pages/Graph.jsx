@@ -78,14 +78,18 @@ const Graph = () => {
 
   return (
     <ErrorBoundary>
-      <GraphModule
-        caseData={activeCase}
-        actions={actions}
-        onAction={handleAction}
-        connectionStatus={connectionStatus}
-      />
+      <div style={{ height: '100%', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+        <GraphModule
+          caseData={activeCase}
+          actions={actions}
+          onAction={handleAction}
+          connectionStatus={connectionStatus}
+          newTransactionEvent={useWebSocket().lastTxEvent}
+        />
+      </div>
     </ErrorBoundary>
   );
+
 };
 
 export default Graph;

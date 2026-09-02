@@ -161,14 +161,16 @@ const App = () => {
         </aside>
 
         {/* Main Content Area */}
-        <main className="flex-1 overflow-auto bg-background">
-          <Routes>
-            <Route path="/" element={<Navigate to="/feed" replace />} />
-            <Route path="/feed" element={<Feed />} />
-            <Route path="/dashboard" element={<ErrorBoundary><Dashboard /></ErrorBoundary>} />
-            <Route path="/cases" element={<Cases />} />
-            <Route path="/graph/:caseId" element={<ErrorBoundary><Graph /></ErrorBoundary>} />
-          </Routes>
+        <main className="flex-1 overflow-hidden bg-background flex flex-col h-full">
+          <div className="flex-1 h-full overflow-hidden">
+            <Routes>
+              <Route path="/" element={<Navigate to="/feed" replace />} />
+              <Route path="/feed" element={<Feed />} />
+              <Route path="/dashboard" element={<ErrorBoundary><Dashboard /></ErrorBoundary>} />
+              <Route path="/cases" element={<Cases />} />
+              <Route path="/graph/:caseId" element={<ErrorBoundary><Graph /></ErrorBoundary>} />
+            </Routes>
+          </div>
         </main>
       </div>
     </Router>

@@ -8,8 +8,10 @@ const initialState = {
   transactions: [],
   cases: [],
   actions: [],
-  connectionStatus: 'OFFLINE'
+  connectionStatus: 'OFFLINE',
+  lastTxEvent: null
 };
+
 
 let store = { ...initialState };
 const listeners = new Set();
@@ -159,12 +161,14 @@ const handleEvent = (payload = {}) => {
       if (exists) return prev;
       return {
         ...prev,
-        transactions: [incoming, ...prev.transactions].slice(0, 100)
+        transactions: [incoming, ...prev.transactions].slice(0, 100),
+        lastTxEvent: incoming
       };
     });
     window.dispatchEvent(new CustomEvent('sentinel_alert', { detail: incoming }));
     return;
   }
+
 
   if (type === EVENT_TYPES.CASE_UPDATED) {
     if (!validateCasePayload(payload)) return;

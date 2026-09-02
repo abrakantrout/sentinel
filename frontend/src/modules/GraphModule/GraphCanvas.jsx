@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, forwardRef, useImperativeHandle } from 'react';
+import React, { useEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react';
 import cytoscape from 'cytoscape';
 import { graphStyles } from './graphStyles';
 import { getRole } from '../../roleStore';
@@ -11,130 +11,89 @@ const formatTransactionLabel = (edge) => {
   return `\u20B9${formattedAmount}${hopStr}`;
 };
 
-const getGraphBounds = (container) => {
-  const width = container?.clientWidth || 800;
-  const height = container?.clientHeight || 600;
-  const padding = Math.max(36, Math.min(70, Math.floor(Math.min(width, height) * 0.09)));
+const applyHierarchicalDagLayout = (cy, nodes, edges) => {
+  if (!cy || cy.nodes().length === 0) return;
 
-  return { width, height, padding };
-};
+  const cyNodes = cy.nodes();
+  const cyEdges = cy.edges();
 
-const getNodeDepths = (nodes, edges) => {
-  const ids = nodes.map((node) => String(node.accountId || node.id));
-  const indegree = new Map(ids.map((id) => [id, 0]));
-  const children = new Map(ids.map((id) => [id, []]));
-
-  edges.forEach((edge) => {
-    const source = String(edge.source);
-    const target = String(edge.target);
-    if (!indegree.has(source) || !indegree.has(target)) return;
-    indegree.set(target, indegree.get(target) + 1);
-    children.get(source).push(target);
+  const inDegree = {};
+  const adj = {};
+  cyNodes.forEach((n) => {
+    const id = n.id();
+    inDegree[id] = 0;
+    adj[id] = [];
   });
 
-  const depths = new Map();
-  let queue = ids.filter((id) => indegree.get(id) === 0);
-  if (queue.length === 0 && ids.length > 0) queue = [ids[0]];
+  cyEdges.forEach((e) => {
+    const src = e.source().id();
+    const tgt = e.target().id();
+    if (adj[src]) adj[src].push(tgt);
+    if (inDegree[tgt] !== undefined) inDegree[tgt] += 1;
+  });
 
-  queue.forEach((id) => depths.set(id, 0));
+  const rankMap = {};
+  const queue = [];
+
+  cyNodes.forEach((n) => {
+    const id = n.id();
+    const nodeLayer = n.data('layer');
+    if (nodeLayer !== undefined && nodeLayer !== null && !isNaN(Number(nodeLayer))) {
+      rankMap[id] = Number(nodeLayer);
+    } else if (inDegree[id] === 0) {
+      queue.push({ id, depth: 0 });
+    }
+  });
+
+  if (queue.length === 0 && cyNodes.length > 0 && Object.keys(rankMap).length === 0) {
+    queue.push({ id: cyNodes[0].id(), depth: 0 });
+  }
 
   while (queue.length > 0) {
-    const id = queue.shift();
-    const nextDepth = (depths.get(id) || 0) + 1;
-    children.get(id)?.forEach((childId) => {
-      if (!depths.has(childId) || nextDepth > depths.get(childId)) {
-        depths.set(childId, nextDepth);
-        queue.push(childId);
+    const { id, depth } = queue.shift();
+    if (rankMap[id] === undefined || depth > rankMap[id]) {
+      rankMap[id] = depth;
+      const neighbors = adj[id] || [];
+      neighbors.forEach((nxt) => queue.push({ id: nxt, depth: depth + 1 }));
+    }
+  }
+
+  const columns = {};
+  cyNodes.forEach((n) => {
+    const id = n.id();
+    const r = rankMap[id] !== undefined ? rankMap[id] : 0;
+    if (!columns[r]) columns[r] = [];
+    columns[r].push(id);
+  });
+
+  const colKeys = Object.keys(columns).map(Number).sort((a, b) => a - b);
+
+  const rankSep = 260;
+  const nodeSep = 145;
+  const startX = 120;
+  const centerY = 360;
+
+  colKeys.forEach((colKey, colIdx) => {
+    const colNodeIds = columns[colKey];
+    const totalInCol = colNodeIds.length;
+    const startY = centerY - ((totalInCol - 1) * nodeSep) / 2;
+
+    colNodeIds.forEach((id, rowIdx) => {
+      const cyNode = cy.getElementById(id);
+      if (cyNode.length > 0) {
+        cyNode.position({
+          x: startX + colIdx * rankSep,
+          y: startY + rowIdx * nodeSep
+        });
       }
     });
-  }
-
-  ids.forEach((id) => {
-    if (!depths.has(id)) depths.set(id, 0);
   });
 
-  return depths;
-};
-
-const positionNode = (cy, id, position, animate) => {
-  const node = cy.getElementById(id);
-  if (node.length === 0) return;
-
-  if (animate) {
-    node.stop();
-    node.animate({ position }, { duration: 450 });
-  } else {
-    node.position(position);
-  }
-};
-
-const applyDenseGridLayout = (cy, orderedIds, container, animate) => {
-  const { width, height, padding } = getGraphBounds(container);
-  const usableWidth = Math.max(width - padding * 2, 1);
-  const usableHeight = Math.max(height - padding * 2, 1);
-  const aspect = usableWidth / usableHeight;
-  const columns = Math.max(1, Math.ceil(Math.sqrt(orderedIds.length * aspect)));
-  const rows = Math.max(1, Math.ceil(orderedIds.length / columns));
-
-  orderedIds.forEach((id, index) => {
-    const row = Math.floor(index / columns);
-    const column = index % columns;
-    const x = padding + (usableWidth * (column + 1)) / (columns + 1);
-    const y = padding + (usableHeight * (row + 1)) / (rows + 1);
-    positionNode(cy, id, { x, y }, animate);
-  });
-};
-
-const shouldUseDenseGrid = (columns, usableWidth, usableHeight) => {
-  const minReadableXGap = 96;
-  const minReadableYGap = 86;
-  const maxRows = Math.max(...Array.from(columns.values(), (ids) => ids.length), 1);
-  const xGap = usableWidth / Math.max(columns.size - 1, 1);
-  const yGap = usableHeight / Math.max(maxRows + 1, 1);
-
-  return columns.size > 7 || xGap < minReadableXGap || yGap < minReadableYGap;
-};
-
-const applyDashboardLayout = (cy, nodes, edges, container, animate) => {
-  const { width, height, padding } = getGraphBounds(container);
-  const usableWidth = Math.max(width - padding * 2, 1);
-  const usableHeight = Math.max(height - padding * 2, 1);
-  const depths = getNodeDepths(nodes, edges);
-  const columns = new Map();
-
-  nodes.forEach((node) => {
-    const id = String(node.accountId || node.id);
-    const depth = depths.get(id) || 0;
-    if (!columns.has(depth)) columns.set(depth, []);
-    columns.get(depth).push(id);
-  });
-
-  const sortedDepths = Array.from(columns.keys()).sort((a, b) => a - b);
-  const orderedIds = sortedDepths.flatMap((depth) => columns.get(depth).sort());
-
-  if (shouldUseDenseGrid(columns, usableWidth, usableHeight)) {
-    applyDenseGridLayout(cy, orderedIds, container, animate);
-    return;
-  }
-
-  const lastColumnIndex = Math.max(sortedDepths.length - 1, 1);
-
-  sortedDepths.forEach((depth, columnIndex) => {
-    const ids = columns.get(depth).sort();
-    ids.forEach((id, rowIndex) => {
-      const x = padding + (usableWidth * columnIndex) / lastColumnIndex;
-      const y = padding + (usableHeight * (rowIndex + 1)) / (ids.length + 1);
-      positionNode(cy, id, { x, y }, animate);
-    });
-  });
-};
-
-const layoutConfig = {
-  name: 'breadthfirst',
-  directed: true,
-  spacingFactor: 1.8,
-  padding: 50,
-  avoidOverlap: true
+  setTimeout(() => {
+    if (cy && !cy.isDestroyed()) {
+      cy.fit(cy.elements(), 70);
+    }
+  }, 40);
 };
 
 const GraphCanvas = forwardRef(({ nodes = [], edges = [], onNodeClick, onEdgeClick, onSelectionChange }, ref) => {
@@ -144,6 +103,9 @@ const GraphCanvas = forwardRef(({ nodes = [], edges = [], onNodeClick, onEdgeCli
   const onNodeClickRef = useRef(onNodeClick);
   const onEdgeClickRef = useRef(onEdgeClick);
   const onSelectionChangeRef = useRef(onSelectionChange);
+  const traceTimerRef = useRef(null);
+
+  const [tooltip, setTooltip] = useState(null);
 
   useEffect(() => {
     onNodeClickRef.current = onNodeClick;
@@ -152,31 +114,101 @@ const GraphCanvas = forwardRef(({ nodes = [], edges = [], onNodeClick, onEdgeCli
   }, [onNodeClick, onEdgeClick, onSelectionChange]);
 
   useImperativeHandle(ref, () => ({
-    highlightNode: (nodeId, duration = 1000) => {
-      const cy = cyRef.current;
-      if (!cy) return;
-      const node = cy.getElementById(nodeId);
-      if (node.length > 0) {
-        node.animate({
-          style: { 'border-width': 10, 'border-color': '#fbbf24' }
-        }, {
-          duration: 200,
-          complete: () => {
-            setTimeout(() => {
-              node.animate({
-                style: {
-                  'border-width': 2,
-                  'border-color': node.data('status') === 'frozen' ? '#6B7280' : '#1D4ED8'
-                }
-              }, { duration: 400 });
-            }, duration);
-          }
+    fit: () => {
+      if (cyRef.current) {
+        cyRef.current.fit(cyRef.current.elements(), 60);
+      }
+    },
+    reset: () => {
+      if (cyRef.current) {
+        cyRef.current.reset();
+        applyHierarchicalDagLayout(cyRef.current, nodes, edges);
+      }
+    },
+    zoomIn: () => {
+      if (cyRef.current) {
+        cyRef.current.zoom({
+          level: cyRef.current.zoom() * 1.25,
+          renderedPosition: { x: containerRef.current.clientWidth / 2, y: containerRef.current.clientHeight / 2 }
         });
       }
+    },
+    zoomOut: () => {
+      if (cyRef.current) {
+        cyRef.current.zoom({
+          level: cyRef.current.zoom() * 0.8,
+          renderedPosition: { x: containerRef.current.clientWidth / 2, y: containerRef.current.clientHeight / 2 }
+        });
+      }
+    },
+    centerOn: (id) => {
+      const cy = cyRef.current;
+      if (!cy) return;
+      const ele = cy.getElementById(String(id));
+      if (ele.length > 0) {
+        cy.center(ele);
+        cy.zoom({ level: 1.3, renderedPosition: { x: containerRef.current.clientWidth / 2, y: containerRef.current.clientHeight / 2 } });
+      }
+    },
+    clearHighlight: () => {
+      const cy = cyRef.current;
+      if (!cy) return;
+      if (traceTimerRef.current) {
+        clearInterval(traceTimerRef.current);
+        traceTimerRef.current = null;
+      }
+      cy.elements().removeClass('path-highlight dimmed new-transaction-pulse');
+      onSelectionChangeRef.current?.(null);
+    },
+    tracePath: (onStepCallback, onCompleteCallback) => {
+      const cy = cyRef.current;
+      if (!cy) return;
+
+      if (traceTimerRef.current) {
+        clearInterval(traceTimerRef.current);
+        traceTimerRef.current = null;
+      }
+
+      cy.elements().removeClass('path-highlight dimmed');
+      const sortedEdges = cy.edges().sort((a, b) => (a.data('hop_number') || 1) - (b.data('hop_number') || 1));
+      
+      if (sortedEdges.length === 0) return;
+
+      cy.elements().addClass('dimmed');
+      let stepIndex = 0;
+
+      traceTimerRef.current = setInterval(() => {
+        if (stepIndex >= sortedEdges.length) {
+          clearInterval(traceTimerRef.current);
+          traceTimerRef.current = null;
+          onCompleteCallback?.();
+          return;
+        }
+
+        const currentEdge = sortedEdges[stepIndex];
+        const sourceNode = currentEdge.source();
+        const targetNode = currentEdge.target();
+
+        currentEdge.removeClass('dimmed').addClass('path-highlight');
+        sourceNode.removeClass('dimmed').addClass('path-highlight');
+        targetNode.removeClass('dimmed').addClass('path-highlight');
+
+        onStepCallback?.({
+          step: stepIndex + 1,
+          totalSteps: sortedEdges.length,
+          edgeId: currentEdge.id(),
+          source: sourceNode.id(),
+          target: targetNode.id(),
+          amount: currentEdge.data('amount'),
+          hop: currentEdge.data('hop_number') || (stepIndex + 1)
+        });
+
+        stepIndex++;
+      }, 450);
     }
   }));
 
-  // 1. Cytoscape setup: create the engine once and keep it alive across data updates.
+  // 1. Cytoscape Setup
   useEffect(() => {
     if (!containerRef.current || isInitializedRef.current) return;
 
@@ -184,7 +216,6 @@ const GraphCanvas = forwardRef(({ nodes = [], edges = [], onNodeClick, onEdgeCli
       container: containerRef.current,
       elements: [],
       style: graphStyles,
-      layout: layoutConfig,
       userZoomingEnabled: true,
       userPanningEnabled: true,
       boxSelectionEnabled: false
@@ -193,80 +224,97 @@ const GraphCanvas = forwardRef(({ nodes = [], edges = [], onNodeClick, onEdgeCli
     cyRef.current = cy;
     isInitializedRef.current = true;
 
+    // Node & Edge Hover Tooltips (Section 6 & 7)
+    cy.on('mouseover', 'node', (evt) => {
+      const node = evt.target;
+      const data = node.data();
+      const pos = evt.renderedPosition;
+      setTooltip({
+        type: 'node',
+        x: pos.x + 20,
+        y: pos.y - 20,
+        id: data.accountId || data.id,
+        entityType: (data.node_type || data.account_type || 'ACCOUNT').toUpperCase(),
+        layer: data.layer || 0,
+        status: data.status || 'ACTIVE',
+        balance: data.balance || 0,
+        inbound: data.total_inbound || 0,
+        outbound: data.total_outbound || 0
+      });
+    });
+
+    cy.on('mouseover', 'edge', (evt) => {
+      const edge = evt.target;
+      const data = edge.data();
+      const pos = evt.renderedPosition;
+      setTooltip({
+        type: 'edge',
+        x: pos.x + 20,
+        y: pos.y - 20,
+        id: data.tx_id || data.id,
+        amount: data.amount || 0,
+        channel: data.channel || 'UPI',
+        hop: data.hop_number || 1,
+        totalHops: data.total_hops || 1,
+        suspicious: data.suspicious || false
+      });
+    });
+
+    cy.on('mouseout', 'node edge', () => {
+      setTooltip(null);
+    });
+
     cy.on('tap', 'node', (evt) => {
       const node = evt.target;
-      cy.elements().removeClass('path-highlight');
+      cy.elements().removeClass('path-highlight dimmed');
 
       const pathElements = node.successors().union(node.predecessors()).union(node);
       pathElements.addClass('path-highlight');
+      cy.elements().difference(pathElements).addClass('dimmed');
 
       const edgeCount = pathElements.edges().length;
-      const hopCount = edgeCount > 0 ? edgeCount : 1;
-      onSelectionChangeRef.current?.({ type: 'node', id: node.id(), hops: hopCount });
+      onSelectionChangeRef.current?.({ type: 'node', id: node.id(), hops: edgeCount || 1 });
       onNodeClickRef.current?.(node.data());
     });
 
     cy.on('tap', 'edge', (evt) => {
       const edge = evt.target;
-      cy.elements().removeClass('path-highlight');
+      cy.elements().removeClass('path-highlight dimmed');
 
       const sourceNode = edge.source();
       const pathElements = sourceNode.successors().union(sourceNode.predecessors()).union(sourceNode).union(edge);
       pathElements.addClass('path-highlight');
+      cy.elements().difference(pathElements).addClass('dimmed');
 
-      const totalHops = edge.data('total_hops') || pathElements.edges().length || 1;
       onSelectionChangeRef.current?.({
         type: 'edge',
         id: edge.id(),
-        hops: totalHops
+        hops: edge.data('total_hops') || 1
       });
       onEdgeClickRef.current?.(edge.data());
     });
 
-
     cy.on('tap', (evt) => {
       if (evt.target === cy) {
-        cy.elements().removeClass('path-highlight');
-        cy.edges().removeClass('show-label');
+        cy.elements().removeClass('path-highlight dimmed');
         onSelectionChangeRef.current?.(null);
         onNodeClickRef.current?.(null);
         onEdgeClickRef.current?.(null);
+        setTooltip(null);
       }
     });
 
-    cy.on('mouseover', 'edge', (evt) => {
-      evt.target.addClass('show-label');
-    });
-
-    cy.on('mouseout', 'edge', (evt) => {
-      evt.target.removeClass('show-label');
-    });
-
     return () => {
+      if (traceTimerRef.current) {
+        clearInterval(traceTimerRef.current);
+      }
       cyRef.current?.destroy();
       cyRef.current = null;
       isInitializedRef.current = false;
     };
   }, []);
 
-  useEffect(() => {
-    const container = containerRef.current;
-    const cy = cyRef.current;
-    if (!container || !cy || !window.ResizeObserver) return undefined;
-
-    const observer = new ResizeObserver(() => {
-      cy.resize();
-      if (nodes.length > 0) {
-        applyDashboardLayout(cy, nodes, edges, container, false);
-        cy.fit(cy.elements(), getGraphBounds(container).padding);
-      }
-    });
-
-    observer.observe(container);
-    return () => observer.disconnect();
-  }, [nodes, edges]);
-
-  // 2. Data sync: update in place without recreating cy instance.
+  // 2. Data Sync & Hierarchical Left-to-Right Layout
   useEffect(() => {
     const cy = cyRef.current;
     if (!cy || !isInitializedRef.current) return;
@@ -275,7 +323,6 @@ const GraphCanvas = forwardRef(({ nodes = [], edges = [], onNodeClick, onEdgeCli
       const role = getRole();
       const currentIds = new Set();
 
-      // Update or Add Nodes
       nodes.forEach((item) => {
         const nodeId = String(item.accountId || item.id);
         currentIds.add(nodeId);
@@ -285,28 +332,36 @@ const GraphCanvas = forwardRef(({ nodes = [], edges = [], onNodeClick, onEdgeCli
         if (existing.length > 0) {
           existing.data({ ...item, displayLabel });
         } else {
-          cy.add({ data: { ...item, id: nodeId, displayLabel } });
+          cy.add({
+            data: { ...item, id: nodeId, displayLabel }
+          });
         }
       });
 
-      // Update or Add Edges
       edges.forEach((edge) => {
-        const edgeId = String(edge.id || edge.tx_id || `${edge.source}-${edge.target}`);
+        const edgeId = String(edge.id || edge.tx_id || `${edge.source || edge.from}-${edge.target || edge.to}`);
         currentIds.add(edgeId);
         
         const existing = cy.getElementById(edgeId);
         if (existing.length > 0) {
           existing.data({ ...edge, label: edge.label || formatTransactionLabel(edge) });
         } else {
-          cy.add({ data: {
-            ...edge,
-            id: edgeId,
-            label: edge.label || formatTransactionLabel(edge)
-          } });
+          const addedEdge = cy.add({
+            data: {
+              ...edge,
+              id: edgeId,
+              source: String(edge.source || edge.from),
+              target: String(edge.target || edge.to),
+              label: edge.label || formatTransactionLabel(edge)
+            }
+          });
+          addedEdge.addClass('new-transaction-pulse');
+          setTimeout(() => {
+            addedEdge.removeClass('new-transaction-pulse');
+          }, 2500);
         }
       });
 
-      // Remove Stale Elements
       cy.elements().forEach((ele) => {
         if (!currentIds.has(ele.id())) {
           ele.remove();
@@ -315,23 +370,56 @@ const GraphCanvas = forwardRef(({ nodes = [], edges = [], onNodeClick, onEdgeCli
     });
 
     if (nodes.length > 0) {
-      applyDashboardLayout(cy, nodes, edges, containerRef.current, false);
-      cy.layout(layoutConfig).run();
-      cy.fit(cy.elements(), 70);
+      applyHierarchicalDagLayout(cy, nodes, edges);
     }
   }, [nodes, edges]);
 
   return (
-    <div
-      ref={containerRef}
-      className="graph-canvas"
-      style={{
-        width: '100%',
-        height: '100%',
-        background: '#f1f5f9',
-        textAlign: 'left'
-      }}
-    />
+    <div className="relative w-full h-full">
+      <div
+        ref={containerRef}
+        className="graph-canvas"
+        style={{
+          width: '100%',
+          height: '100%',
+          background: '#0B132B',
+          textAlign: 'left'
+        }}
+      />
+
+      {/* FLOATING HOVER TOOLTIP POPOVER (SECTION 6 & 7) */}
+      {tooltip && (
+        <div
+          className="pointer-events-none fixed z-50 bg-slate-950/95 border border-slate-700/80 rounded-xl p-3 shadow-2xl backdrop-blur-md font-mono text-[11px] text-slate-200 min-w-48 space-y-1"
+          style={{ left: `${tooltip.x}px`, top: `${tooltip.y}px` }}
+        >
+          {tooltip.type === 'node' ? (
+            <>
+              <div className="flex justify-between items-center pb-1 border-b border-slate-800 font-bold text-sky-400">
+                <span>{tooltip.id}</span>
+                <span className="text-[9px] bg-slate-800 text-slate-300 px-1.5 py-0.5 rounded">{tooltip.status}</span>
+              </div>
+              <div className="flex justify-between text-slate-400"><span>Type:</span><span className="text-purple-400 font-bold">{tooltip.entityType}</span></div>
+              <div className="flex justify-between text-slate-400"><span>Hop Layer:</span><span className="text-sky-300">Layer {tooltip.layer}</span></div>
+              <div className="flex justify-between text-slate-400"><span>Inbound:</span><span className="text-emerald-400">₹{Number(tooltip.inbound).toLocaleString('en-IN')}</span></div>
+              <div className="flex justify-between text-slate-400"><span>Outbound:</span><span className="text-rose-400">₹{Number(tooltip.outbound).toLocaleString('en-IN')}</span></div>
+            </>
+          ) : (
+            <>
+              <div className="flex justify-between items-center pb-1 border-b border-slate-800 font-bold text-emerald-400">
+                <span>{tooltip.id}</span>
+                <span className={`text-[9px] px-1.5 py-0.5 rounded ${tooltip.suspicious ? 'bg-rose-950 text-rose-300 border border-rose-600/50' : 'bg-slate-800 text-slate-300'}`}>
+                  {tooltip.suspicious ? 'SUSPICIOUS' : 'NORMAL'}
+                </span>
+              </div>
+              <div className="flex justify-between text-slate-400"><span>Amount:</span><span className="text-emerald-300 font-bold">₹{Number(tooltip.amount).toLocaleString('en-IN')}</span></div>
+              <div className="flex justify-between text-slate-400"><span>Channel:</span><span className="text-purple-300">{tooltip.channel}</span></div>
+              <div className="flex justify-between text-slate-400"><span>Hop Position:</span><span className="text-sky-300">Hop {tooltip.hop}/{tooltip.totalHops}</span></div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
   );
 });
 
