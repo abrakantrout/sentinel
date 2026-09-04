@@ -92,7 +92,7 @@ const Graph = () => {
 
   return (
     <ErrorBoundary>
-      <div style={{ height: '100%', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+      <div className="w-full h-full flex flex-col overflow-hidden" style={{ height: '100vh', maxHeight: '100vh' }}>
         <GraphModule
           caseData={activeCase}
           actions={actions}

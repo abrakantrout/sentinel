@@ -1,14 +1,14 @@
 import React, { useEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react';
 import cytoscape from 'cytoscape';
-import { graphStyles } from './graphStyles';
+import { graphStyles, SVG_USER, SVG_ALERT, SVG_CARD, SVG_STORE, SVG_UPI } from './graphStyles';
 import { getRole } from '../../roleStore';
 import { maskAccount } from '../../utils/maskAccount';
 
 const formatTransactionLabel = (edge) => {
-  const amount = Number(edge.amount || 0);
+  const amount = Math.round(Number(edge.amount || 0));
   const formattedAmount = new Intl.NumberFormat('en-IN').format(amount);
-  const hopStr = edge.hop_number ? ` \u00B7 Hop ${edge.hop_number}${edge.total_hops ? '/' + edge.total_hops : ''}` : '';
-  return `\u20B9${formattedAmount}${hopStr}`;
+  const ch = edge.channel || 'UPI';
+  return `₹${formattedAmount} • ${ch}`;
 };
 
 const applyHierarchicalDagLayout = (cy, nodes, edges) => {
@@ -49,14 +49,29 @@ const applyHierarchicalDagLayout = (cy, nodes, edges) => {
     queue.push({ id: cyNodes[0].id(), depth: 0 });
   }
 
+  const visited = new Set();
   while (queue.length > 0) {
     const { id, depth } = queue.shift();
-    if (rankMap[id] === undefined || depth > rankMap[id]) {
+    if (visited.has(id) || depth > 8) continue;
+    visited.add(id);
+    if (rankMap[id] === undefined) {
       rankMap[id] = depth;
-      const neighbors = adj[id] || [];
-      neighbors.forEach((nxt) => queue.push({ id: nxt, depth: depth + 1 }));
     }
+    const neighbors = adj[id] || [];
+    neighbors.forEach((nxt) => {
+      if (!visited.has(nxt)) {
+        queue.push({ id: nxt, depth: depth + 1 });
+      }
+    });
   }
+
+  // Ensure every node has a column rank
+  cyNodes.forEach((n) => {
+    const id = n.id();
+    if (rankMap[id] === undefined) {
+      rankMap[id] = 0;
+    }
+  });
 
   const columns = {};
   cyNodes.forEach((n) => {
@@ -70,8 +85,8 @@ const applyHierarchicalDagLayout = (cy, nodes, edges) => {
 
   const rankSep = 260;
   const nodeSep = 145;
-  const startX = 120;
-  const centerY = 360;
+  const startX = 140;
+  const centerY = 320;
 
   colKeys.forEach((colKey, colIdx) => {
     const colNodeIds = columns[colKey];
@@ -90,10 +105,13 @@ const applyHierarchicalDagLayout = (cy, nodes, edges) => {
   });
 
   setTimeout(() => {
-    if (cy && !cy.isDestroyed()) {
-      cy.fit(cy.elements(), 70);
+    if (cy && !cy.destroyed()) {
+      cy.resize();
+      if (cy.elements().length > 0) {
+        cy.fit(cy.elements(), 80);
+      }
     }
-  }, 40);
+  }, 100);
 };
 
 const GraphCanvas = forwardRef(({ nodes = [], edges = [], onNodeClick, onEdgeClick, onSelectionChange }, ref) => {
@@ -222,6 +240,7 @@ const GraphCanvas = forwardRef(({ nodes = [], edges = [], onNodeClick, onEdgeCli
     });
 
     cyRef.current = cy;
+    window.cy = cy;
     isInitializedRef.current = true;
 
     // Node & Edge Hover Tooltips (Section 6 & 7)
@@ -328,12 +347,20 @@ const GraphCanvas = forwardRef(({ nodes = [], edges = [], onNodeClick, onEdgeCli
         currentIds.add(nodeId);
         const displayLabel = role === "admin" ? nodeId : maskAccount(nodeId);
         
+        const t = (item.node_type || item.account_type || '').toLowerCase();
+        let bgImg = SVG_USER;
+        if (t.includes('mule') || t.includes('suspect')) bgImg = SVG_ALERT;
+        else if (t.includes('cashout') || t.includes('atm') || t.includes('destination') || t.includes('collector')) bgImg = SVG_CARD;
+        else if (t.includes('merchant')) bgImg = SVG_STORE;
+        else if (t.includes('upi')) bgImg = SVG_UPI;
+
+        const nodeData = { ...item, id: nodeId, displayLabel, bgImg };
         const existing = cy.getElementById(nodeId);
         if (existing.length > 0) {
-          existing.data({ ...item, displayLabel });
+          existing.data(nodeData);
         } else {
           cy.add({
-            data: { ...item, id: nodeId, displayLabel }
+            data: nodeData
           });
         }
       });
@@ -375,14 +402,16 @@ const GraphCanvas = forwardRef(({ nodes = [], edges = [], onNodeClick, onEdgeCli
   }, [nodes, edges]);
 
   return (
-    <div className="relative w-full h-full">
+    <div className="relative w-full h-full" style={{ position: 'relative', width: '100%', height: '100%' }}>
       <div
         ref={containerRef}
         className="graph-canvas"
         style={{
+          position: 'absolute',
+          inset: 0,
           width: '100%',
           height: '100%',
-          background: '#0B132B',
+          background: 'transparent',
           textAlign: 'left'
         }}
       />
