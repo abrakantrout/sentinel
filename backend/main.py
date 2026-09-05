@@ -72,6 +72,12 @@ async def lifespan(app: FastAPI):
     if sentinel_mode == "production" and not db_url:
         raise RuntimeError("PRODUCTION CONFIGURATION FAILURE: DATABASE_URL environment variable is required in production mode.")
 
+    try:
+        from app.core.seed_data import seed_initial_demonstration_data
+        seed_initial_demonstration_data(data_store)
+    except Exception as e:
+        print(f"[SENTINEL] Seed data initialization error: {e}")
+
     loop_task = asyncio.create_task(_baseline_loop())
     yield
     loop_task.cancel()
@@ -562,9 +568,9 @@ async def get_case_by_id(
 
 
 @app.get("/cases/{case_id}/graph")
-def get_case_graph(case_id: str) -> dict[str, Any]:
+def get_case_graph(case_id: str, tx_id: Optional[str] = None) -> dict[str, Any]:
     from app.engines.graph_engine import build_investigation_graph
-    return build_investigation_graph(case_id, data_store)
+    return build_investigation_graph(case_id, data_store, focus_tx_id=tx_id)
 
 
 @app.get("/transactions/{tx_id}/graph")
@@ -574,7 +580,7 @@ def get_transaction_graph(tx_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=f"Transaction '{tx_id}' not found")
     case_id = tx.get("case_id") or f"CASE-{tx_id[:8]}"
     from app.engines.graph_engine import build_investigation_graph
-    return build_investigation_graph(case_id, data_store)
+    return build_investigation_graph(case_id, data_store, focus_tx_id=tx_id)
 
 
 

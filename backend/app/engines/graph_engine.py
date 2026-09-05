@@ -1,4 +1,5 @@
 import hashlib
+from typing import Optional, List, Dict, Any
 
 def get_graph(case_id: str, store: dict) -> dict:
     if "graphs" not in store:
@@ -203,6 +204,34 @@ def _recalculate_node_stats(graph: dict):
         elif not node.get("node_type"):
             node["node_type"] = "individual"
 
+        # Calculate or inherit node risk scores from connected transactions and archetype
+        curr_risk = float(node.get("risk_score", 0.0))
+        if curr_risk <= 0.0:
+            connected_risks = [
+                float(e.get("risk_score", 0.0))
+                for e in graph.get("edges", [])
+                if (e.get("from") == nid or e.get("to") == nid or e.get("source") == nid or e.get("target") == nid)
+                and float(e.get("risk_score", 0.0)) > 0.0
+            ]
+            max_edge_risk = max(connected_risks) if connected_risks else 0.0
+            ntype = str(node.get("node_type", "")).lower()
+            nstatus = str(node.get("status", "")).upper()
+
+            if ntype == "victim" or layer_val == 0:
+                node["risk_score"] = 15.0
+            elif nstatus in ("FLAGGED", "FROZEN"):
+                node["risk_score"] = max(max_edge_risk, 85.0) if max_edge_risk > 0 else 88.0
+            elif ntype == "mule":
+                node["risk_score"] = max_edge_risk if max_edge_risk > 0 else 85.0
+            elif ntype in ("cashout", "crypto"):
+                node["risk_score"] = max(max_edge_risk, 88.0) if max_edge_risk > 0 else 92.0
+            elif ntype == "merchant":
+                node["risk_score"] = max_edge_risk if max_edge_risk > 0 else 65.0
+            elif ntype == "collector":
+                node["risk_score"] = max_edge_risk if max_edge_risk > 0 else 80.0
+            else:
+                node["risk_score"] = max_edge_risk if max_edge_risk > 0 else 20.0
+
     graph["max_hops"] = max(max_layer, 1)
 
 
@@ -211,11 +240,11 @@ MAX_GRAPH_HOPS = 8
 
 
 def classify_topology_archetype(graph: dict) -> str:
-    """Classifies graph structure into teammate topology archetypes."""
+    """Classifies graph structure into topology archetypes based on genuine topology."""
     nodes = graph.get("nodes", [])
     edges = graph.get("edges", [])
-    if not edges:
-        return "DIRECT_CASHOUT"
+    if not edges or not nodes:
+        return "NONE"
 
     out_degrees = {}
     in_degrees = {}
@@ -235,231 +264,218 @@ def classify_topology_archetype(graph: dict) -> str:
     max_out = max(out_degrees.values()) if out_degrees else 0
     max_in = max(in_degrees.values()) if in_degrees else 0
 
-    if max_out >= 3:
+    if max_out >= 2 and max_out > max_in:
         return "FAN_OUT"
-    if max_in >= 3:
+    if max_in >= 2 and max_in > max_out:
         return "FAN_IN"
-    if len(edges) == 1:
-        return "DIRECT_CASHOUT"
+    if len(edges) == 1 and len(nodes) == 2:
+        return "DIRECT_TRANSFER"
     if len(nodes) >= 4 and len(edges) >= 3:
         return "STRUCTURING_PASS_THROUGH"
 
     return "LINEAR_CHAIN"
 
 
-def _ensure_multi_hop_forensic_topology(case_id: str, graph: dict) -> dict:
+
+
+
+def build_investigation_graph(case_id: str, store: dict, max_depth: int = DEFAULT_GRAPH_HOPS, focus_tx_id: Optional[str] = None) -> dict:
     """
-    Guarantees every collapsed/1-hop case expands into a rich multi-hop forensic network topology (8-15 nodes, 8-20 edges, 3-6 hops)
-    derived deterministically from case_id identity so page refreshes remain consistent.
-    """
-    nodes = graph.get("nodes", [])
-    edges = graph.get("edges", [])
-
-    # If the graph already has multi-hop data (>= 3 nodes and >= 2 edges), keep it intact!
-    if len(nodes) >= 3 and len(edges) >= 2:
-        return graph
-
-    seed_val = int(hashlib.md5(case_id.encode("utf-8")).hexdigest()[:8], 16)
-    archetype_idx = seed_val % 4
-    cid_suffix = case_id.replace("CASE-", "")[:6]
-
-    new_nodes = []
-    new_edges = []
-
-    def _n(nid, ntype, layer, balance=125000.0, risk=85.0):
-        return {
-            "account_id": nid,
-            "accountId": nid,
-            "id": nid,
-            "status": "active" if ntype not in ["mule", "cashout"] else "flagged",
-            "balance": balance,
-            "account_type": "SOURCE" if ntype == "victim" else "MULE" if ntype == "mule" else "INTERMEDIARY" if ntype in ["collector", "UPI"] else "DESTINATION",
-            "node_type": ntype,
-            "layer": layer,
-            "risk_score": risk
-        }
-
-    def _e(tx_id, src, tgt, amt, hop, total_hops, ch="UPI", susp=True):
-        return {
-            "id": tx_id,
-            "tx_id": tx_id,
-            "from": src,
-            "to": tgt,
-            "source": src,
-            "target": tgt,
-            "amount": float(amt),
-            "hop_number": hop,
-            "total_hops": total_hops,
-            "channel": ch,
-            "suspicious": susp,
-            "pattern_type": "MULE_CHAIN" if susp else "STANDARD"
-        }
-
-    if archetype_idx == 0:
-        # AGGREGATOR FAN-IN COLLECTION (10 Nodes, 10 Edges, 4 Hops)
-        v1, v2, v3 = f"ACC-VICTIM-{cid_suffix}-1", f"ACC-VICTIM-{cid_suffix}-2", f"ACC-VICTIM-{cid_suffix}-3"
-        m1, m2 = f"ACC-MULE-{cid_suffix}-A", f"ACC-MULE-{cid_suffix}-B"
-        c1 = f"ACC-COLLECTOR-{cid_suffix}"
-        u1 = f"UPI-GATEWAY-{cid_suffix}"
-        ex1, ex2, ex3 = f"CASHOUT-ATM-{cid_suffix}", f"CRYPTO-BINANCE-{cid_suffix}", f"MERCH-DRAIN-{cid_suffix}"
-
-        new_nodes = [
-            _n(v1, "victim", 0, 450000.0, 30.0), _n(v2, "victim", 0, 320000.0, 25.0), _n(v3, "victim", 0, 510000.0, 20.0),
-            _n(m1, "mule", 1, 15000.0, 88.0), _n(m2, "mule", 1, 22000.0, 92.0),
-            _n(c1, "collector", 2, 850000.0, 96.0),
-            _n(u1, "UPI", 3, 40000.0, 75.0),
-            _n(ex1, "cashout", 4, 0.0, 99.0), _n(ex2, "crypto", 4, 0.0, 95.0), _n(ex3, "merchant", 4, 0.0, 80.0)
-        ]
-        new_edges = [
-            _e(f"TX-{cid_suffix}-01", v1, m1, 185000.0, 1, 4, "IMPS", True),
-            _e(f"TX-{cid_suffix}-02", v2, m2, 140000.0, 1, 4, "UPI", True),
-            _e(f"TX-{cid_suffix}-03", v3, c1, 260000.0, 1, 4, "NEFT", True),
-            _e(f"TX-{cid_suffix}-04", m1, c1, 180000.0, 2, 4, "UPI", True),
-            _e(f"TX-{cid_suffix}-05", m2, c1, 135000.0, 2, 4, "IMPS", True),
-            _e(f"TX-{cid_suffix}-06", c1, u1, 120000.0, 3, 4, "UPI", True),
-            _e(f"TX-{cid_suffix}-07", c1, ex1, 300000.0, 3, 4, "ATM", True),
-            _e(f"TX-{cid_suffix}-08", c1, ex2, 220000.0, 3, 4, "NEFT", True),
-            _e(f"TX-{cid_suffix}-09", u1, ex3, 110000.0, 4, 4, "CARD", False),
-            _e(f"TX-{cid_suffix}-10", m1, ex1, 40000.0, 2, 4, "ATM", True)
-        ]
-
-    elif archetype_idx == 1:
-        # MULTI-HOP STRUCTURING PASS-THROUGH (11 Nodes, 11 Edges, 5 Hops)
-        v1 = f"ACC-SRC-{cid_suffix}"
-        m1, m2, m3, m4 = f"ACC-MULE-1-{cid_suffix}", f"ACC-MULE-2-{cid_suffix}", f"ACC-MULE-3-{cid_suffix}", f"ACC-MULE-4-{cid_suffix}"
-        c1 = f"ACC-HUB-{cid_suffix}"
-        u1 = f"UPI-PAY-{cid_suffix}"
-        ex1, ex2, ex3, ex4 = f"CASHOUT-ATM-1", f"CASHOUT-ATM-2", f"CRYPTO-WALLET-1", f"MERCHANT-STORE"
-
-        new_nodes = [
-            _n(v1, "victim", 0, 950000.0, 35.0),
-            _n(m1, "mule", 1, 45000.0, 85.0), _n(m2, "mule", 2, 35000.0, 89.0), _n(m3, "mule", 3, 28000.0, 93.0), _n(m4, "mule", 3, 19000.0, 91.0),
-            _n(c1, "collector", 4, 620000.0, 97.0),
-            _n(u1, "UPI", 2, 50000.0, 70.0),
-            _n(ex1, "cashout", 5, 0.0, 99.0), _n(ex2, "cashout", 5, 0.0, 98.0), _n(ex3, "crypto", 5, 0.0, 96.0), _n(ex4, "merchant", 5, 0.0, 65.0)
-        ]
-        new_edges = [
-            _e(f"TX-{cid_suffix}-01", v1, m1, 450000.0, 1, 5, "NEFT", True),
-            _e(f"TX-{cid_suffix}-02", m1, m2, 435000.0, 2, 5, "IMPS", True),
-            _e(f"TX-{cid_suffix}-03", m1, u1, 12000.0, 2, 5, "UPI", False),
-            _e(f"TX-{cid_suffix}-04", m2, m3, 210000.0, 3, 5, "UPI", True),
-            _e(f"TX-{cid_suffix}-05", m2, m4, 215000.0, 3, 5, "UPI", True),
-            _e(f"TX-{cid_suffix}-06", m3, c1, 205000.0, 4, 5, "IMPS", True),
-            _e(f"TX-{cid_suffix}-07", m4, c1, 210000.0, 4, 5, "NEFT", True),
-            _e(f"TX-{cid_suffix}-08", c1, ex1, 150000.0, 5, 5, "ATM", True),
-            _e(f"TX-{cid_suffix}-09", c1, ex2, 160000.0, 5, 5, "ATM", True),
-            _e(f"TX-{cid_suffix}-10", c1, ex3, 100000.0, 5, 5, "NEFT", True),
-            _e(f"TX-{cid_suffix}-11", u1, ex4, 45000.0, 3, 5, "CARD", False)
-        ]
-
-    elif archetype_idx == 2:
-        # DISPERSAL FAN-OUT LAYERING (10 Nodes, 10 Edges, 4 Hops)
-        v1, v2 = f"ACC-VICTIM-A-{cid_suffix}", f"ACC-VICTIM-B-{cid_suffix}"
-        m1 = f"ACC-PRIMARY-MULE-{cid_suffix}"
-        m2, m3, m4 = f"ACC-BRANCH-MULE-1", f"ACC-BRANCH-MULE-2", f"ACC-BRANCH-MULE-3"
-        c1 = f"ACC-COLLECTOR-HUB"
-        ex1, ex2, ex3 = f"CASHOUT-ATM-SOUTH", f"CRYPTO-BINANCE-INT", f"MERCHANT-CHECKOUT"
-
-        new_nodes = [
-            _n(v1, "victim", 0, 600000.0, 20.0), _n(v2, "victim", 0, 400000.0, 25.0),
-            _n(m1, "mule", 1, 980000.0, 95.0),
-            _n(m2, "mule", 2, 300000.0, 88.0), _n(m3, "mule", 2, 310000.0, 90.0), _n(m4, "mule", 2, 320000.0, 87.0),
-            _n(c1, "collector", 3, 400000.0, 94.0),
-            _n(ex1, "cashout", 4, 0.0, 99.0), _n(ex2, "crypto", 4, 0.0, 97.0), _n(ex3, "merchant", 4, 0.0, 60.0)
-        ]
-        new_edges = [
-            _e(f"TX-{cid_suffix}-01", v1, m1, 550000.0, 1, 4, "NEFT", True),
-            _e(f"TX-{cid_suffix}-02", v2, m1, 380000.0, 1, 4, "IMPS", True),
-            _e(f"TX-{cid_suffix}-03", m1, m2, 300000.0, 2, 4, "UPI", True),
-            _e(f"TX-{cid_suffix}-04", m1, m3, 310000.0, 2, 4, "UPI", True),
-            _e(f"TX-{cid_suffix}-05", m1, m4, 320000.0, 2, 4, "UPI", True),
-            _e(f"TX-{cid_suffix}-06", m2, ex1, 280000.0, 3, 4, "ATM", True),
-            _e(f"TX-{cid_suffix}-07", m3, c1, 290000.0, 3, 4, "NEFT", True),
-            _e(f"TX-{cid_suffix}-08", m4, ex2, 300000.0, 3, 4, "NEFT", True),
-            _e(f"TX-{cid_suffix}-09", c1, ex1, 150000.0, 4, 4, "ATM", True),
-            _e(f"TX-{cid_suffix}-10", c1, ex3, 130000.0, 4, 4, "CARD", False)
-        ]
-
-    else: # 3
-        # CIRCULAR LOOP & SHARED INTERMEDIARY (9 Nodes, 9 Edges, 4 Hops)
-        v1 = f"ACC-ORIGIN-{cid_suffix}"
-        m1, m2, m3 = f"ACC-MULE-LOOP-1", f"ACC-MULE-LOOP-2", f"ACC-MULE-LOOP-3"
-        c1 = f"ACC-SHARED-COLLECTOR"
-        u1 = f"UPI-ROUTER-99"
-        ex1, ex2 = f"CASHOUT-ATM-MAIN", f"CRYPTO-VAULT"
-
-        new_nodes = [
-            _n(v1, "victim", 0, 750000.0, 40.0),
-            _n(m1, "mule", 1, 50000.0, 92.0), _n(m2, "mule", 2, 40000.0, 94.0), _n(m3, "mule", 2, 30000.0, 91.0),
-            _n(c1, "collector", 3, 500000.0, 98.0),
-            _n(u1, "UPI", 1, 80000.0, 78.0),
-            _n(ex1, "cashout", 4, 0.0, 99.0), _n(ex2, "crypto", 4, 0.0, 96.0)
-        ]
-        new_edges = [
-            _e(f"TX-{cid_suffix}-01", v1, m1, 350000.0, 1, 4, "NEFT", True),
-            _e(f"TX-{cid_suffix}-02", v1, u1, 150000.0, 1, 4, "UPI", True),
-            _e(f"TX-{cid_suffix}-03", m1, m2, 330000.0, 2, 4, "IMPS", True),
-            _e(f"TX-{cid_suffix}-04", m2, m3, 310000.0, 3, 4, "UPI", True),
-            _e(f"TX-{cid_suffix}-05", m3, m1, 50000.0, 3, 4, "UPI", True),
-            _e(f"TX-{cid_suffix}-06", m2, c1, 250000.0, 3, 4, "NEFT", True),
-            _e(f"TX-{cid_suffix}-07", u1, c1, 140000.0, 2, 4, "UPI", True),
-            _e(f"TX-{cid_suffix}-08", c1, ex1, 200000.0, 4, 4, "ATM", True),
-            _e(f"TX-{cid_suffix}-09", c1, ex2, 170000.0, 4, 4, "NEFT", True)
-        ]
-
-    existing_node_ids = {n.get("account_id") or n.get("id") for n in nodes}
-    for nn in new_nodes:
-        nid = nn.get("account_id")
-        if nid not in existing_node_ids:
-            nodes.append(nn)
-
-    existing_tx_ids = {e.get("tx_id") or e.get("id") for e in edges}
-    for ne in new_edges:
-        tid = ne.get("tx_id")
-        if tid not in existing_tx_ids:
-            edges.append(ne)
-
-    graph["nodes"] = nodes
-    graph["edges"] = edges
-    _recalculate_node_stats(graph)
-    graph["topology_type"] = classify_topology_archetype(graph)
-    return graph
-
-
-def build_investigation_graph(case_id: str, store: dict, max_depth: int = DEFAULT_GRAPH_HOPS) -> dict:
-    """
-    Dynamically builds the complete connected multi-hop investigation graph for a case.
-    Ensures rich multi-hop topology (8-15 nodes, 8-20 edges, 3-6 hops) is returned for all cases.
+    Dynamically builds the authentic transaction network graph for a focused transaction or case.
+    Strictly data-driven:
+    - 2-node direct transfer -> 2 nodes, 1 edge
+    - Multi-hop chain -> all real intermediary mules/accounts in sequence
+    - Branching / split -> real fan-out or fan-in topology
+    Zero synthetic padding, zero fake disconnected nodes.
     """
     if "graphs" not in store:
         store["graphs"] = {}
 
+    all_txs = list(store.get("transactions", {}).values())
+    case_obj = store.get("cases", {}).get(case_id, {})
+    account_store = store.get("accounts", {})
+
+    # If focused on a specific transaction, build an authentic transaction-anchored graph
+    if focus_tx_id:
+        f_tx = store.get("transactions", {}).get(focus_tx_id)
+        if not f_tx:
+            for t in all_txs:
+                if t.get("tx_id") == focus_tx_id:
+                    f_tx = t
+                    break
+
+        if not f_tx:
+            return {
+                "nodes": [],
+                "edges": [],
+                "primary_tx_id": focus_tx_id,
+                "case_id": case_id,
+                "topology_type": "NONE"
+            }
+
+        f_snd = f_tx.get("sender_account")
+        f_rcv = f_tx.get("receiver_account")
+        f_cid = f_tx.get("chain_id")
+        f_rid = f_tx.get("root_transaction_id") or focus_tx_id
+        f_case = f_tx.get("case_id") or case_id
+
+        nodes_by_id = {}
+        edges_by_tx = {}
+
+        def _add_account_node(acc_id: str, default_type: str = "MULE"):
+            if not acc_id or acc_id in nodes_by_id:
+                return
+            acc_info = account_store.get(acc_id) or {"account_id": acc_id}
+            acc_type = acc_info.get("account_type")
+            if not acc_type:
+                if acc_id.startswith("ACC-USR") or acc_id.startswith("ACC-VICTIM") or acc_id.startswith("ACC-SRC"):
+                    acc_type = "SOURCE"
+                elif acc_id.startswith("ACC-MERCH") or acc_id.startswith("CASHOUT") or acc_id.startswith("DESK") or acc_id.startswith("CRYPTO"):
+                    acc_type = "DESTINATION"
+                elif acc_id.startswith("ACC-COL") or acc_id.startswith("ACC-HUB") or acc_id.startswith("UPI"):
+                    acc_type = "INTERMEDIARY"
+                else:
+                    acc_type = default_type
+
+            nodes_by_id[acc_id] = {
+                "account_id": str(acc_id),
+                "accountId": str(acc_id),
+                "id": str(acc_id),
+                "status": acc_info.get("status", "active"),
+                "balance": float(acc_info.get("current_balance_sim", 125000.0)),
+                "account_type": acc_type,
+                "node_type": acc_type.lower(),
+                "risk_score": float(acc_info.get("risk_score", 85.0 if acc_type == "MULE" else 20.0))
+            }
+
+        def _add_tx_edge(tx_item: dict, is_primary: bool = False):
+            tid = tx_item.get("tx_id")
+            if not tid or tid in edges_by_tx:
+                return
+            s = str(tx_item.get("sender_account", ""))
+            r = str(tx_item.get("receiver_account", ""))
+            if not s or not r:
+                return
+            _add_account_node(s, "SOURCE" if is_primary else "MULE")
+            _add_account_node(r, "DESTINATION" if is_primary else "MULE")
+            edges_by_tx[tid] = {
+                "id": str(tid),
+                "from": s,
+                "to": r,
+                "source": s,
+                "target": r,
+                "tx_id": str(tid),
+                "amount": float(tx_item.get("amount", 0.0)),
+                "hop_number": int(tx_item.get("hop_number", 1)),
+                "total_hops": int(tx_item.get("total_hops", 1)),
+                "chain_id": tx_item.get("chain_id") or f"CHAIN-{tid[:8]}",
+                "pattern_type": tx_item.get("pattern_type") or "STANDARD",
+                "suspicious": bool(tx_item.get("risk_score", 0) >= 60 or tx_item.get("is_mule", False)),
+                "channel": tx_item.get("channel", "UPI"),
+                "parent_transaction_id": tx_item.get("parent_transaction_id"),
+                "root_transaction_id": tx_item.get("root_transaction_id") or tid,
+                "timestamp": tx_item.get("timestamp", ""),
+                "is_primary_path": is_primary
+            }
+
+        # 1. Add primary focal transaction
+        _add_tx_edge(f_tx, is_primary=True)
+
+        # 2. If part of an explicit chain/root network, add all transactions sharing that chain or root
+        if f_cid:
+            chain_txs = [t for t in all_txs if t.get("chain_id") == f_cid]
+            for c_tx in chain_txs:
+                _add_tx_edge(c_tx)
+
+        if f_rid:
+            root_txs = [
+                t for t in all_txs
+                if (t.get("root_transaction_id") == f_rid or t.get("parent_transaction_id") == f_rid)
+                and (not f_case or t.get("case_id") == f_case)
+            ]
+            for r_tx in root_txs:
+                _add_tx_edge(r_tx)
+
+        # 3. Connected Component BFS Traversal (up to depth_limit hops)
+        depth_limit = min(max(1, max_depth), MAX_GRAPH_HOPS)
+        current_connected_accounts = set(nodes_by_id.keys())
+
+        for _ in range(depth_limit):
+            found_new = False
+            for t in all_txs:
+                tid = t.get("tx_id")
+                if not tid or tid in edges_by_tx:
+                    continue
+                s = str(t.get("sender_account", ""))
+                r = str(t.get("receiver_account", ""))
+                is_touching = (s in current_connected_accounts or r in current_connected_accounts)
+                if not is_touching:
+                    continue
+
+                case_match = (f_case and t.get("case_id") == f_case)
+                chain_match = (f_cid and t.get("chain_id") == f_cid)
+                # Check root or parent linkage bidirectionally
+                link_match = bool(
+                    (t.get("parent_transaction_id") in edges_by_tx) or 
+                    (t.get("root_transaction_id") and t.get("root_transaction_id") == f_rid) or
+                    (any(e.get("parent_transaction_id") == tid for e in edges_by_tx.values()))
+                )
+
+                if case_match or chain_match or link_match:
+                    _add_tx_edge(t)
+                    if s:
+                        current_connected_accounts.add(s)
+                    if r:
+                        current_connected_accounts.add(r)
+                    found_new = True
+
+            if not found_new:
+                break
+
+        # Strictly authentic data: no disconnected sibling stuffing!
+        final_edges = list(edges_by_tx.values())
+        final_edges.sort(key=lambda e: (e.get("hop_number", 1), e.get("timestamp", "")))
+
+        active_node_ids = set()
+        for e in final_edges:
+            active_node_ids.add(e.get("from"))
+            active_node_ids.add(e.get("to"))
+
+        final_nodes = [n for n in nodes_by_id.values() if (n.get("account_id") or n.get("id")) in active_node_ids]
+        graph = {
+            "nodes": final_nodes,
+            "edges": final_edges,
+            "primary_tx_id": focus_tx_id,
+            "case_id": f_case,
+            "chain_id": f_cid
+        }
+        _recalculate_node_stats(graph)
+        graph["topology_type"] = classify_topology_archetype(graph)
+        return graph
+
+    # Otherwise build case graph
     existing_graph = store["graphs"].get(case_id, {"nodes": [], "edges": []})
     nodes_by_id = {n.get("account_id") or n.get("id"): n for n in existing_graph.get("nodes", [])}
     edges_by_tx = {e.get("tx_id"): e for e in existing_graph.get("edges", [])}
 
     depth_limit = min(max(1, max_depth), MAX_GRAPH_HOPS)
-    all_txs = list(store.get("transactions", {}).values())
-    case_obj = store.get("cases", {}).get(case_id, {})
-
     target_chain_ids = set()
     target_root_txs = set()
-    for e in existing_graph.get("edges", []):
-        if e.get("chain_id"):
-            target_chain_ids.add(e.get("chain_id"))
-        if e.get("root_transaction_id"):
-            target_root_txs.add(e.get("root_transaction_id"))
 
     case_tx_ids = set(case_obj.get("transactions", []))
-
     seed_accounts = set(case_obj.get("chain", []))
     if case_obj.get("origin_account"):
         seed_accounts.add(case_obj.get("origin_account"))
+
     for e in existing_graph.get("edges", []):
         if e.get("from"):
             seed_accounts.add(e.get("from"))
         if e.get("to"):
             seed_accounts.add(e.get("to"))
+        if e.get("chain_id"):
+            target_chain_ids.add(e.get("chain_id"))
+        if e.get("root_transaction_id"):
+            target_root_txs.add(e.get("root_transaction_id"))
 
     visited_accounts = set(seed_accounts)
     current_frontier = set(seed_accounts)
@@ -510,7 +526,6 @@ def build_investigation_graph(case_id: str, store: dict, max_depth: int = DEFAUL
                     visited_accounts.add(rcv)
         current_frontier = next_frontier
 
-    account_store = store.get("accounts", {})
     for tid, tx in collected_txs.items():
         snd = tx.get("sender_account")
         rcv = tx.get("receiver_account")
@@ -524,7 +539,7 @@ def build_investigation_graph(case_id: str, store: dict, max_depth: int = DEFAUL
                 "id": str(snd),
                 "status": acc_info.get("status", "active"),
                 "balance": float(acc_info.get("current_balance_sim", 0.0)),
-                "account_type": acc_info.get("account_type"),
+                "account_type": acc_info.get("account_type") or ("SOURCE" if snd.startswith("ACC-USR") else "MULE"),
                 "risk_score": float(acc_info.get("risk_score", 0.0))
             }
 
@@ -536,7 +551,7 @@ def build_investigation_graph(case_id: str, store: dict, max_depth: int = DEFAUL
                 "id": str(rcv),
                 "status": acc_info.get("status", "active"),
                 "balance": float(acc_info.get("current_balance_sim", 0.0)),
-                "account_type": acc_info.get("account_type"),
+                "account_type": acc_info.get("account_type") or ("DESTINATION" if rcv.startswith("ACC-MERCH") else "MULE"),
                 "risk_score": float(acc_info.get("risk_score", 0.0))
             }
 
@@ -557,10 +572,13 @@ def build_investigation_graph(case_id: str, store: dict, max_depth: int = DEFAUL
                 "channel": tx.get("channel", "UPI"),
                 "parent_transaction_id": tx.get("parent_transaction_id"),
                 "root_transaction_id": tx.get("root_transaction_id") or tid,
-                "timestamp": tx.get("timestamp", "")
+                "timestamp": tx.get("timestamp", ""),
+                "risk_score": float(tx.get("risk_score", 0.0))
             }
 
     final_edges = list(edges_by_tx.values())
+    if len(final_edges) > depth_limit:
+        final_edges = final_edges[:depth_limit]
     active_node_ids = set()
     for e in final_edges:
         active_node_ids.add(e.get("from"))
@@ -570,10 +588,9 @@ def build_investigation_graph(case_id: str, store: dict, max_depth: int = DEFAUL
     if not final_nodes and nodes_by_id:
         final_nodes = list(nodes_by_id.values())
 
-    graph = {"nodes": final_nodes, "edges": final_edges}
-    
-    # Enforce rich multi-hop forensic topology for every case
-    graph = _ensure_multi_hop_forensic_topology(case_id, graph)
+    graph = {"nodes": final_nodes, "edges": final_edges, "case_id": case_id}
 
     store["graphs"][case_id] = graph
+    _recalculate_node_stats(graph)
+    graph["topology_type"] = classify_topology_archetype(graph)
     return graph
